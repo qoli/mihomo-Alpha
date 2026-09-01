@@ -102,6 +102,7 @@ type Smart struct {
 	suppressCount          atomic.Int64
 	suppressLast           atomic.Int64
 	selectionCoordinator   smartSelectionCoordinator
+	activeMonitor          smartActiveMonitor
 }
 
 type dialResult struct {
@@ -174,6 +175,7 @@ func NewSmart(option GroupCommonOption, smartOption SmartOption, emptyFallback C
 	}
 
 	s.InitSmart()
+	s.startActiveConnectionMonitor()
 
 	return s, nil
 }
@@ -524,6 +526,14 @@ func (s *Smart) WrapConnWithMetric(c C.Conn, proxy C.Proxy, metadata *C.Metadata
 	c.AppendToChains(s)
 
 	start := time.Now()
+	timing := newSmartConnectionTiming(
+		s.Name(),
+		proxy.Name(),
+		metadata.SmartTarget,
+		metadata.WildcardTarget,
+		time.Duration(connectTime)*time.Millisecond,
+		start,
+	)
 
 	var firstWriteErr atomic.TypedValue[error]
 	var firstReadErr atomic.TypedValue[error]
@@ -531,6 +541,7 @@ func (s *Smart) WrapConnWithMetric(c C.Conn, proxy C.Proxy, metadata *C.Metadata
 
 	if N.NeedHandshake(c) {
 		c = callback.NewFirstWriteCallBackConn(c, func(err error) {
+			timing.logEvent(timing.firstWriteEvent(time.Now(), err))
 			if err != nil {
 				firstWriteErr.Store(err)
 			}
@@ -538,21 +549,24 @@ func (s *Smart) WrapConnWithMetric(c C.Conn, proxy C.Proxy, metadata *C.Metadata
 	}
 
 	c = callback.NewFirstReadCallBackConn(c, func(err error) {
-		firstReadLatency.Store(time.Since(start).Milliseconds())
+		now := time.Now()
+		firstReadLatency.Store(now.Sub(start).Milliseconds())
+		timing.logEvent(timing.firstReadEvent(now, err))
 		if err != nil {
 			firstReadErr.Store(err)
 		}
 	})
+	c = s.monitorActiveConnection(c, proxy, metadata)
 
 	return s.registerClosureMetricsCallback(
 		c, proxy, metadata, connectTime,
-		&firstReadLatency, &firstReadErr, &firstWriteErr,
+		&firstReadLatency, &firstReadErr, &firstWriteErr, timing,
 	)
 }
 
 func (s *Smart) WrapPacketConnWithMetric(pc C.PacketConn, proxy C.Proxy, metadata *C.Metadata, connectTime int64) C.PacketConn {
 	pc.AppendToChains(s)
-	
+
 	var udpLatency atomic.Int64
 
 	pc = callback.NewFirstReadCallBackPacketConn(pc, func(latency int64) {
@@ -642,6 +656,9 @@ func (s *Smart) Proxies() []C.Proxy {
 func (s *Smart) filterProxies(metadata *C.Metadata, wildcardTarget string, names []string, weights []float64, all []C.Proxy, minCount int, isUDP bool) []C.Proxy {
 	blockedNodes := s.store.GetBlockedNodes(s.Name(), s.configName)
 	wtFailNodes, _, _, wtBlocked := s.store.GetHostStatus(s.Name(), s.configName, wildcardTarget, s.hostFailLimit, metadata.SmartTarget)
+	activeCooling := func(name string) bool {
+		return s.activeNodeCoolingDown(name, wildcardTarget, time.Now())
+	}
 
 	var proxyByName map[string]C.Proxy
 	if len(names) > 0 {
@@ -658,7 +675,7 @@ func (s *Smart) filterProxies(metadata *C.Metadata, wildcardTarget string, names
 	for i, name := range names {
 		checkNodeUsed[name] = true
 		proxy := proxyByName[name]
-		if proxy == nil || blockedNodes[name] || !proxy.AliveForTestUrl(s.testUrl) || (isUDP && !proxy.SupportUDP()) {
+		if proxy == nil || blockedNodes[name] || activeCooling(name) || !proxy.AliveForTestUrl(s.testUrl) || (isUDP && !proxy.SupportUDP()) {
 			continue
 		}
 		w := 0.0
@@ -748,6 +765,9 @@ func (s *Smart) filterProxies(metadata *C.Metadata, wildcardTarget string, names
 		if blockedNodes[name] {
 			continue
 		}
+		if activeCooling(name) {
+			continue
+		}
 		if !p.AliveForTestUrl(s.testUrl) || (isUDP && !p.SupportUDP()) {
 			continue
 		}
@@ -794,6 +814,9 @@ func (s *Smart) filterProxies(metadata *C.Metadata, wildcardTarget string, names
 	if len(selected) == 0 {
 		fallbackAll := defaultSort(slices.Clone(all))
 		for _, p := range fallbackAll {
+			if activeCooling(p.Name()) {
+				continue
+			}
 			if (wtFailNodes[p.Name()] == 0 || (wtBlocked && wtFailNodes[p.Name()] != 1)) && p.AliveForTestUrl(s.testUrl) && (!isUDP || p.SupportUDP()) {
 				selected = append(selected, p)
 			}
@@ -804,6 +827,9 @@ func (s *Smart) filterProxies(metadata *C.Metadata, wildcardTarget string, names
 
 		if len(selected) == 0 {
 			for _, p := range fallbackAll {
+				if activeCooling(p.Name()) {
+					continue
+				}
 				if p.AliveForTestUrl(s.testUrl) {
 					selected = append(selected, p)
 				}
@@ -815,6 +841,9 @@ func (s *Smart) filterProxies(metadata *C.Metadata, wildcardTarget string, names
 
 		if len(selected) == 0 {
 			for _, p := range fallbackAll {
+				if activeCooling(p.Name()) {
+					continue
+				}
 				selected = append(selected, p)
 				if len(selected) >= minCount {
 					break
@@ -1460,11 +1489,11 @@ func (s *Smart) logConnectionStats(err error, record *smart.StatsRecord, metadat
 	}
 
 	log.Debugln("[Smart] Connection status: [%s], Updated weights: (Model: [%s], TCP: [%.4f], UDP: [%.4f], TCP ASN: [%.4f], UDP ASN: [%.4f], Base: [%.4f], Priority: [%.2f]) "+
-		"For (Group: [%s] - Node: [%s] - Network: [%s] - Address: [%s]) "+
+		"For (ID: [%s] - Group: [%s] - Node: [%s] - Network: [%s] - Address: [%s]) "+
 		"- Current: (Connect: [%s], Latency: [%s], LossRate: [%.2f%%], Up: [%s], Down: [%s], Max Up Speed: [%s], Max Down Speed: [%s], Duration: [%s]) "+
 		"- History: (Success: [%d], Failure: [%d], EMA Connect: [%s], EMA Latency: [%s], Cumul LossRate: [%.2f%%], Total Up: [%s], Total Down: [%s], Max Up Speed: [%s], Max Down Speed: [%s], Avg Duration: [%s])",
 		statusStr, weightSource, record.Weights[smart.WeightTypeTCP], record.Weights[smart.WeightTypeUDP], tcpAsnWeight, udpAsnWeight, baseWeight, priorityFactor,
-		s.Name(), proxyName, metadata.NetWork.String(), addressDisplay,
+		metadata.UUID, s.Name(), proxyName, metadata.NetWork.String(), addressDisplay,
 		formatTimeUnit(float64(connectTime)),
 		formatTimeUnit(float64(latency)),
 		lossRate*100,
@@ -1670,7 +1699,7 @@ func (s *Smart) recordConnectionStats(metadata *C.Metadata, proxy C.Proxy,
 
 	// block node for the specific domain/IP (wildcardTarget + SmartTarget two-level records)
 	failedBlock := s.markNodeFailure(metadata, proxyName, isDegraded, checked, blockCode)
-	
+
 	if isDegraded || failedBlock {
 		s.closeSameConnection(metadata, proxyName, target, asnNumber, true)
 	}
@@ -1701,7 +1730,7 @@ func (s *Smart) recordConnectionStats(metadata *C.Metadata, proxy C.Proxy,
 		connectTime, latency, uploadTotalMB, downloadTotalMB, maxUploadRateKB, maxDownloadRateKB, connectionDuration, asnNumber, ModelPredicted, lossRate, cumulLossRate)
 }
 
-func (s *Smart) registerClosureMetricsCallback(c C.Conn, proxy C.Proxy, metadata *C.Metadata, connectTime int64, firstReadLatency *atomic.Int64, firstReadErr *atomic.TypedValue[error], firstWriteErr *atomic.TypedValue[error]) C.Conn {
+func (s *Smart) registerClosureMetricsCallback(c C.Conn, proxy C.Proxy, metadata *C.Metadata, connectTime int64, firstReadLatency *atomic.Int64, firstReadErr *atomic.TypedValue[error], firstWriteErr *atomic.TypedValue[error], timing *smartConnectionTiming) C.Conn {
 	return callback.NewCloseCallbackConn(c, func() {
 		tracker := statistic.DefaultManager.Get(metadata.UUID)
 		if tracker != nil {
@@ -1711,6 +1740,7 @@ func (s *Smart) registerClosureMetricsCallback(c C.Conn, proxy C.Proxy, metadata
 			connectionDuration := time.Since(info.Start).Milliseconds()
 			maxUploadRate := info.MaxUploadRate.Load()
 			maxDownloadRate := info.MaxDownloadRate.Load()
+			timing.logClose(time.Now(), metadata.UUID, connectionDuration, uploadTotal, downloadTotal)
 
 			latency := firstReadLatency.Load()
 			readErr := firstReadErr.Load()
