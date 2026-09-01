@@ -330,7 +330,6 @@ func (s *Smart) DialContext(ctx context.Context, metadata *C.Metadata) (C.Conn, 
 				finalErr = err
 			} else {
 				s.store.StoreUnwrapResult(s.Name(), s.configName, metadata.SmartTarget, asnNumber, metadata.WildcardTarget, []C.Proxy{p})
-				s.closeSameConnection(metadata, p.Name(), metadata.SmartTarget, asnNumber, false)
 				s.onDialSuccess()
 				return s.WrapConnWithMetric(c, p, metadata, connectTime), nil
 			}
@@ -392,7 +391,6 @@ func (s *Smart) ListenPacketContext(ctx context.Context, metadata *C.Metadata) (
 			}
 
 			s.store.StoreUnwrapResult(s.Name(), s.configName, metadata.SmartTarget, asnNumber, metadata.WildcardTarget, []C.Proxy{proxy})
-			s.closeSameConnection(metadata, proxy.Name(), metadata.SmartTarget, asnNumber, false)
 			s.onDialSuccess()
 			return s.WrapPacketConnWithMetric(pc, proxy, metadata, connectTime), nil
 		}
