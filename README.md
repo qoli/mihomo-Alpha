@@ -34,6 +34,9 @@ including its platform matrix, `with_gvisor` build tag, and archive naming.
 The rolling version is `alpha-smart-<commit>`. Check the Actions run for build failures;
 an unsuccessful build does not replace the published binaries.
 
+Before syncing upstream, review the [fork intent registry](docs/fork-intent/README.md)
+for the Smart behavior and distribution contracts that this fork maintains.
+
 ## Features
 
 - Local HTTP/HTTPS/SOCKS server with authentication support
