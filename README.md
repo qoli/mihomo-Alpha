@@ -18,6 +18,22 @@
   </a>
 </p>
 
+## Alpha Smart binaries
+
+Download this fork's binaries from [Prerelease-Alpha](https://github.com/qoli/mihomo-Alpha/releases/tag/Prerelease-Alpha).
+The [Build workflow](https://github.com/qoli/mihomo-Alpha/actions/workflows/build.yml) follows
+[vernesong/mihomo](https://github.com/vernesong/mihomo/blob/Alpha/.github/workflows/build.yml),
+including its platform matrix, `with_gvisor` build tag, and archive naming.
+
+- Pushes to `Alpha` automatically build and replace the rolling prerelease after all build jobs succeed. Documentation-only changes are excluded.
+- To rebuild manually, run **Build** on `Alpha` with **version** left empty.
+- A `v*` tag push or a manual **version** such as `v1.20.0` publishes a versioned release from the workflow's source commit. Existing tags must identify that same commit.
+- Releases include `version.txt` and SHA-256 `checksums.txt`. Binary filenames include the version; Windows uses `.zip`, and other platforms use `.gz`.
+- Pull requests run builds and tests without publishing releases.
+
+The rolling version is `alpha-smart-<commit>`. Check the Actions run for build failures;
+an unsuccessful build does not replace the published binaries.
+
 ## Features
 
 - Local HTTP/HTTPS/SOCKS server with authentication support
