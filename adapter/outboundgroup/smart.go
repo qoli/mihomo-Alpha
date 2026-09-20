@@ -21,8 +21,8 @@ import (
 	"github.com/dlclark/regexp2"
 	"github.com/metacubex/mihomo/common/atomic"
 	"github.com/metacubex/mihomo/common/callback"
-	"github.com/metacubex/mihomo/common/xsync"
 	N "github.com/metacubex/mihomo/common/net"
+	"github.com/metacubex/mihomo/common/xsync"
 	"github.com/metacubex/mihomo/component/geodata"
 	"github.com/metacubex/mihomo/component/mmdb"
 	"github.com/metacubex/mihomo/component/profile/cachefile"
@@ -49,19 +49,19 @@ const (
 	flushQueueInterval       = 5 * time.Minute
 	rankingInterval          = 5 * time.Minute
 
-	maxRetries               = 3
-	maxSelected              = 10
+	maxRetries  = 3
+	maxSelected = 10
 
-	parallelDials            = 5
-	connectThreshold         = 5.0
+	parallelDials    = 5
+	connectThreshold = 5.0
 
-	floodWindow              = 2 * time.Second
-	floodThreshold           = 50
+	floodWindow    = 2 * time.Second
+	floodThreshold = 50
 )
 
 var (
-	flushQueueOnce       atomic.Bool
-	smartInitOnce        sync.Once
+	flushQueueOnce atomic.Bool
+	smartInitOnce  sync.Once
 )
 
 type SmartOption struct {
@@ -75,34 +75,34 @@ type SmartOption struct {
 
 type Smart struct {
 	*GroupBase
-	store                  *smart.Store
+	store *smart.Store
 
-	wg                     sync.WaitGroup
-	ctx                    context.Context
-	cancel                 context.CancelFunc
+	wg     sync.WaitGroup
+	ctx    context.Context
+	cancel context.CancelFunc
 
-	configName             string
-	selected               string
-	testUrl                string
-	expectedStatus         string
-	disableUDP             bool
+	configName     string
+	selected       string
+	testUrl        string
+	expectedStatus string
+	disableUDP     bool
 
-	dataCollector          *lightgbm.DataCollector
-	weightModel            *lightgbm.WeightModel
-	policyPriority         []priorityRule
-	priorityCache          xsync.Map[string, float64]
-	sampleRate             float64
-	useLightGBM            bool
-	collectData            bool
-	preferASN              bool
-	hostFailLimit          int
-	tolerance              uint16
+	dataCollector  *lightgbm.DataCollector
+	weightModel    *lightgbm.WeightModel
+	policyPriority []priorityRule
+	priorityCache  xsync.Map[string, float64]
+	sampleRate     float64
+	useLightGBM    bool
+	collectData    bool
+	preferASN      bool
+	hostFailLimit  int
+	tolerance      uint16
 
-	suppressStats          atomic.Bool
-	suppressCount          atomic.Int64
-	suppressLast           atomic.Int64
-	selectionCoordinator   smartSelectionCoordinator
-	activeMonitor          smartActiveMonitor
+	suppressStats        atomic.Bool
+	suppressCount        atomic.Int64
+	suppressLast         atomic.Int64
+	selectionCoordinator smartSelectionCoordinator
+	activeMonitor        smartActiveMonitor
 }
 
 type dialResult struct {
@@ -140,28 +140,28 @@ func NewSmart(option GroupCommonOption, smartOption SmartOption, emptyFallback C
 
 	s := &Smart{
 		GroupBase: NewGroupBase(GroupBaseOption{
-			Name:            option.Name,
-			Type:            C.Smart,
-			Hidden:          option.Hidden,
-			Icon:            option.Icon,
-			Filter:          option.Filter,
-			ExcludeFilter:   option.ExcludeFilter,
-			ExcludeType:     option.ExcludeType,
-			TestTimeout:     option.TestTimeout,
-			MaxFailedTimes:  option.MaxFailedTimes,
-			EmptyFallback:   emptyFallback,
-			Providers:       providers,
+			Name:           option.Name,
+			Type:           C.Smart,
+			Hidden:         option.Hidden,
+			Icon:           option.Icon,
+			Filter:         option.Filter,
+			ExcludeFilter:  option.ExcludeFilter,
+			ExcludeType:    option.ExcludeType,
+			TestTimeout:    option.TestTimeout,
+			MaxFailedTimes: option.MaxFailedTimes,
+			EmptyFallback:  emptyFallback,
+			Providers:      providers,
 		}),
-		testUrl:              option.URL,
-		expectedStatus:       option.ExpectedStatus,
-		configName:           configName,
-		disableUDP:           option.DisableUDP,
-		policyPriority:       make([]priorityRule, 0),
-		sampleRate:           1,
-		useLightGBM:          smartOption.UseLightGBM,
-		collectData:          smartOption.CollectData,
-		preferASN:            smartOption.PreferASN,
-		tolerance:            smartOption.Tolerance,
+		testUrl:        option.URL,
+		expectedStatus: option.ExpectedStatus,
+		configName:     configName,
+		disableUDP:     option.DisableUDP,
+		policyPriority: make([]priorityRule, 0),
+		sampleRate:     1,
+		useLightGBM:    smartOption.UseLightGBM,
+		collectData:    smartOption.CollectData,
+		preferASN:      smartOption.PreferASN,
+		tolerance:      smartOption.Tolerance,
 	}
 
 	s.hostFailLimit = s.maxFailedTimes
@@ -365,7 +365,7 @@ func (s *Smart) DialContext(ctx context.Context, metadata *C.Metadata) (C.Conn, 
 		}
 
 		if historyConnectTime > 0 {
-			timeout = time.Duration(float64(historyConnectTime) * connectThreshold) * time.Millisecond
+			timeout = time.Duration(float64(historyConnectTime)*connectThreshold) * time.Millisecond
 		}
 
 		if timeout > C.DefaultTCPTimeout || timeout <= 0 {
@@ -430,10 +430,6 @@ func (s *Smart) ListenPacketContext(ctx context.Context, metadata *C.Metadata) (
 	}
 	proxies := selection.proxies
 	asnNumber := selection.asnNumber
-	winner := ""
-	defer func() {
-		s.finishDialSelection(selection, winner, err)
-	}()
 
 	limit := len(proxies)
 	if limit > maxSelected {
@@ -466,6 +462,7 @@ func (s *Smart) ListenPacketContext(ctx context.Context, metadata *C.Metadata) (
 
 			if err != nil {
 				if tunnel.ShouldStopRetry(err) {
+					s.finishDialSelection(selection, "", err)
 					return nil, err
 				}
 				finalErr = err
@@ -473,12 +470,9 @@ func (s *Smart) ListenPacketContext(ctx context.Context, metadata *C.Metadata) (
 				continue
 			}
 
-			if selection.persistWinner {
-				s.store.StoreUnwrapResult(s.Name(), s.configName, metadata.SmartTarget, asnNumber, metadata.WildcardTarget, []C.Proxy{proxy})
-			}
-			s.onDialSuccess()
-			winner = proxy.Name()
-			return s.WrapPacketConnWithMetric(pc, proxy, metadata, connectTime), nil
+			// Creating a UDP association does not prove that the remote path can
+			// reply. The packet monitor commits the winner on the first response.
+			return s.WrapPacketConnWithMetric(pc, proxy, metadata, connectTime, asnNumber, selection), nil
 		}
 
 		if singleProxyRetry {
@@ -491,6 +485,7 @@ func (s *Smart) ListenPacketContext(ctx context.Context, metadata *C.Metadata) (
 	if finalErr == nil {
 		finalErr = fmt.Errorf("smart selection has no packet candidate for %s", metadata.SmartTarget)
 	}
+	s.finishDialSelection(selection, "", finalErr)
 	return nil, finalErr
 }
 
@@ -564,16 +559,20 @@ func (s *Smart) WrapConnWithMetric(c C.Conn, proxy C.Proxy, metadata *C.Metadata
 	)
 }
 
-func (s *Smart) WrapPacketConnWithMetric(pc C.PacketConn, proxy C.Proxy, metadata *C.Metadata, connectTime int64) C.PacketConn {
+func (s *Smart) WrapPacketConnWithMetric(pc C.PacketConn, proxy C.Proxy, metadata *C.Metadata, connectTime int64, asnNumber string, selection smartDialSelection) C.PacketConn {
 	pc.AppendToChains(s)
 
-	var udpLatency atomic.Int64
-
-	pc = callback.NewFirstReadCallBackPacketConn(pc, func(latency int64) {
-		udpLatency.Store(latency)
+	monitored := s.monitorActivePacketConnection(pc, proxy, metadata, asnNumber, func(int64) {
+		if selection.persistWinner {
+			s.store.StoreUnwrapResult(s.Name(), s.configName, metadata.SmartTarget, asnNumber, metadata.WildcardTarget, []C.Proxy{proxy})
+		}
+		s.onDialSuccess()
+		s.finishDialSelection(selection, proxy.Name(), nil)
+	}, func(err error) {
+		s.finishDialSelection(selection, "", err)
 	})
 
-	return s.registerPacketClosureMetricsCallback(pc, proxy, metadata, connectTime, &udpLatency)
+	return s.registerPacketClosureMetricsCallback(monitored, proxy, metadata, connectTime)
 }
 
 func (s *Smart) Set(name string) error {
@@ -657,7 +656,8 @@ func (s *Smart) filterProxies(metadata *C.Metadata, wildcardTarget string, names
 	blockedNodes := s.store.GetBlockedNodes(s.Name(), s.configName)
 	wtFailNodes, _, _, wtBlocked := s.store.GetHostStatus(s.Name(), s.configName, wildcardTarget, s.hostFailLimit, metadata.SmartTarget)
 	activeCooling := func(name string) bool {
-		return s.activeNodeCoolingDown(name, wildcardTarget, time.Now())
+		now := time.Now()
+		return s.activeNodeCoolingDown(name, wildcardTarget, now) || (isUDP && s.activePacketNodeCoolingDown(name, wildcardTarget, now))
 	}
 
 	var proxyByName map[string]C.Proxy
@@ -1025,9 +1025,9 @@ func (s *Smart) updateNodeRanking() {
 	if len(rankingWrapper.Result) > 0 {
 		now := time.Now().Unix()
 		lastUpdated := rankingWrapper.LastUpdated
-		cacheAge := time.Duration(now - lastUpdated) * time.Second
+		cacheAge := time.Duration(now-lastUpdated) * time.Second
 
-		if cacheAge < 30 * time.Minute {
+		if cacheAge < 30*time.Minute {
 			rankedNodes := make(map[string]bool, len(rankingWrapper.Result))
 			for _, r := range rankingWrapper.Result {
 				rankedNodes[r.Name] = true
@@ -1041,7 +1041,7 @@ func (s *Smart) updateNodeRanking() {
 			}
 
 			if !hasUnrankedProxy {
-				if cacheAge <= 10 * time.Minute {
+				if cacheAge <= 10*time.Minute {
 					return
 				}
 				proxyMap := make(map[string]C.Proxy, len(proxies))
@@ -1240,34 +1240,34 @@ func (s *Smart) calcMADMetrics(delays []float64) (currentAnomaly bool, unstable 
 		return true, true, 0, 0
 	}
 
-	if float64(recentSentinels) / float64(recentCount) > SentinelThreshold {
+	if float64(recentSentinels)/float64(recentCount) > SentinelThreshold {
 		unstable = true
 	}
 
 	if m < minSamples {
-		last := delays[n - 1]
+		last := delays[n-1]
 		currentAnomaly = last >= sentinel
 		return currentAnomaly, unstable, 0, 0
 	}
 
 	sort.Float64s(filtered)
 
-	if m % 2 == 1 {
-		median = filtered[m / 2]
+	if m%2 == 1 {
+		median = filtered[m/2]
 	} else {
-		median = (filtered[m / 2 - 1] + filtered[m / 2]) / 2
+		median = (filtered[m/2-1] + filtered[m/2]) / 2
 	}
 
 	devs := make([]float64, 0, m)
 	for _, v := range filtered {
-		devs = append(devs, math.Abs(v - median))
+		devs = append(devs, math.Abs(v-median))
 	}
 	sort.Float64s(devs)
 
-	if m % 2 == 1 {
-		mad = devs[m / 2]
+	if m%2 == 1 {
+		mad = devs[m/2]
 	} else {
-		mad = (devs[m / 2 - 1] + devs[m / 2]) / 2
+		mad = (devs[m/2-1] + devs[m/2]) / 2
 	}
 
 	if mad == 0 {
@@ -1282,12 +1282,12 @@ func (s *Smart) calcMADMetrics(delays []float64) (currentAnomaly bool, unstable 
 			varSum += d * d
 		}
 		std := math.Sqrt(varSum / float64(m))
-		threshold = mean + 2 * std
-		last := delays[n - 1]
+		threshold = mean + 2*std
+		last := delays[n-1]
 		if last >= sentinel {
 			currentAnomaly = true
 		} else {
-			currentAnomaly = last > threshold && delays[n - 2] > threshold
+			currentAnomaly = last > threshold && delays[n-2] > threshold
 		}
 
 		return currentAnomaly, unstable, threshold, calcGrade(threshold)
@@ -1298,7 +1298,7 @@ func (s *Smart) calcMADMetrics(delays []float64) (currentAnomaly bool, unstable 
 		k = smallK
 	}
 
-	threshold = median + k * scale * mad
+	threshold = median + k*scale*mad
 
 	if median > 0 {
 		robustCV = scale * mad / median
@@ -1306,11 +1306,11 @@ func (s *Smart) calcMADMetrics(delays []float64) (currentAnomaly bool, unstable 
 		robustCV = 0
 	}
 
-	last := delays[n - 1]
+	last := delays[n-1]
 	if last >= sentinel {
 		currentAnomaly = true
 	} else {
-		currentAnomaly = last > threshold && delays[n - 2] > threshold
+		currentAnomaly = last > threshold && delays[n-2] > threshold
 	}
 
 	if !unstable {
@@ -1325,7 +1325,7 @@ func (s *Smart) checkNodesStable() {
 	operations := make([]smart.StoreOperation, 0, len(proxies))
 	nodesToBlock := make(map[string]*smart.NodeState, len(proxies))
 	now := time.Now().Unix()
-	blockedUntil := time.Now().Add(checkInterval + 2 * time.Minute).Unix()
+	blockedUntil := time.Now().Add(checkInterval + 2*time.Minute).Unix()
 
 	nodeStateData, _ := s.store.GetNodeStates(s.Name(), s.configName)
 
@@ -1678,7 +1678,7 @@ func (s *Smart) recordConnectionStats(metadata *C.Metadata, proxy C.Proxy,
 
 	input := lightgbm.CreateModelInputFromStatsRecord(
 		atomicRecord, metadata,
-		uploadTotalMB, downloadTotalMB, maxUploadRateKB, maxDownloadRateKB, float64(connectionDuration) / 60000.0, wildcardTarget,
+		uploadTotalMB, downloadTotalMB, maxUploadRateKB, maxDownloadRateKB, float64(connectionDuration)/60000.0, wildcardTarget,
 		lossRate, cumulLossRate,
 	)
 	input.ConnectionFailed = err != nil
@@ -1698,9 +1698,13 @@ func (s *Smart) recordConnectionStats(metadata *C.Metadata, proxy C.Proxy,
 		networkStr, asnNumber, isUDP, lossRate, emaLossRate)
 
 	// block node for the specific domain/IP (wildcardTarget + SmartTarget two-level records)
-	failedBlock := s.markNodeFailure(metadata, proxyName, isDegraded, checked, blockCode)
+	udpNoResponse := errors.Is(err, errSmartUDPNoResponse)
+	failedBlock := false
+	if !udpNoResponse {
+		failedBlock = s.markNodeFailure(metadata, proxyName, isDegraded, checked, blockCode)
+	}
 
-	if isDegraded || failedBlock {
+	if (isDegraded || failedBlock) && !udpNoResponse {
 		s.closeSameConnection(metadata, proxyName, target, asnNumber, true)
 	}
 
@@ -1726,7 +1730,7 @@ func (s *Smart) recordConnectionStats(metadata *C.Metadata, proxy C.Proxy,
 		s.collectConnectionData(input, metadata, collectedWeight, proxyName, ModelPredicted)
 	}
 
-	s.logConnectionStats(err, statsSnapshot, metadata, calculatedWeight / priorityFactor, priorityFactor, addressDisplay, proxyName,
+	s.logConnectionStats(err, statsSnapshot, metadata, calculatedWeight/priorityFactor, priorityFactor, addressDisplay, proxyName,
 		connectTime, latency, uploadTotalMB, downloadTotalMB, maxUploadRateKB, maxDownloadRateKB, connectionDuration, asnNumber, ModelPredicted, lossRate, cumulLossRate)
 }
 
@@ -1772,7 +1776,7 @@ func (s *Smart) registerClosureMetricsCallback(c C.Conn, proxy C.Proxy, metadata
 	})
 }
 
-func (s *Smart) registerPacketClosureMetricsCallback(pc C.PacketConn, proxy C.Proxy, metadata *C.Metadata, connectTime int64, udpLatency *atomic.Int64) C.PacketConn {
+func (s *Smart) registerPacketClosureMetricsCallback(pc *smartMonitoredPacketConn, proxy C.Proxy, metadata *C.Metadata, connectTime int64) C.PacketConn {
 	return callback.NewCloseCallbackPacketConn(pc, func() {
 		tracker := statistic.DefaultManager.Get(metadata.UUID)
 		if tracker != nil {
@@ -1783,8 +1787,8 @@ func (s *Smart) registerPacketClosureMetricsCallback(pc C.PacketConn, proxy C.Pr
 			maxUploadRate := info.MaxUploadRate.Load()
 			maxDownloadRate := info.MaxDownloadRate.Load()
 
-			go s.recordConnectionStats(metadata, proxy, connectTime, udpLatency.Load(),
-				uploadTotal, downloadTotal, maxUploadRate, maxDownloadRate, connectionDuration, nil, nil)
+			go s.recordConnectionStats(metadata, proxy, connectTime, pc.firstResponseLatency(),
+				uploadTotal, downloadTotal, maxUploadRate, maxDownloadRate, connectionDuration, nil, pc.outcomeError())
 			return
 		}
 	})
@@ -1844,7 +1848,7 @@ func (s *Smart) checkNodeQuality(
 	if downloadTotal < 0.03 && metadata.Host != "" && metadata.DstPort == 443 && !isUDP && metadata.Type != C.INNER {
 		var failure bool
 		var checked bool
-		if now - wtLastCheck > 300 || now - wtLastFailure < 300 {
+		if now-wtLastCheck > 300 || now-wtLastFailure < 300 {
 			checked = true
 			status, ok, err := s.StatusTest(proxy, metadata.Host)
 			if err == nil {
