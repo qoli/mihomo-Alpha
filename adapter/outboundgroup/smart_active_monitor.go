@@ -24,11 +24,9 @@ const (
 )
 
 type smartActiveMonitor struct {
-	mu             sync.Mutex
-	connections    map[*smartMonitoredConn]struct{}
-	packets        map[*smartMonitoredPacketConn]struct{}
-	evidence       map[string]smartDegradationEvidence
-	packetCooldown map[string]time.Time
+	mu          sync.Mutex
+	connections map[*smartMonitoredConn]struct{}
+	evidence    map[string]smartDegradationEvidence
 }
 
 type smartDegradationEvidence struct {
@@ -223,10 +221,6 @@ func (s *Smart) sampleActiveConnections(now time.Time) {
 	for conn := range s.activeMonitor.connections {
 		connections = append(connections, conn)
 	}
-	packets := make([]*smartMonitoredPacketConn, 0, len(s.activeMonitor.packets))
-	for conn := range s.activeMonitor.packets {
-		packets = append(packets, conn)
-	}
 	s.activeMonitor.mu.Unlock()
 
 	for _, conn := range connections {
@@ -238,11 +232,6 @@ func (s *Smart) sampleActiveConnections(now time.Time) {
 		conn.observeTotals(info.UploadTotal.Load(), info.DownloadTotal.Load(), now)
 		if signal, ok := conn.sample(now); ok {
 			s.handleActiveDegradation(conn, signal, now)
-		}
-	}
-	for _, conn := range packets {
-		if conn.sample(now) {
-			s.handleActivePacketNoResponse(conn, now)
 		}
 	}
 }

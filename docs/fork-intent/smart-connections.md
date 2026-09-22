@@ -120,6 +120,14 @@ HTTP 政策判定同時用於 `checkNodeQuality` 與 `checkHostStatus` 的恢復
 
 ## 驗證入口
 
+### 2026-09-22 UDP 回退記錄
+
+撤銷 `92844c60`，恢復 `651ca468` 的 Smart 程式行為。使用者觀察到出口疑似過早被放棄、切換頻繁；程式審查發現該改動延後共用 TCP／UDP 選舉完成時間，且單條 UDP/443 在上傳至少 2400 bytes、5 秒無回包時便冷卻 node＋wildcard 5 分鐘，並無條件刪除共用 target／ASN 快取。這些是程式層面的退化路徑，尚未以現場日誌證明是體感問題的實際原因。
+
+本次完整撤回該改動，不加入新的門檻或替代機制：UDP association 建立成功後即完成選舉，首次回包仍由原有 callback 記錄 latency；不再執行此次新增的 UDP 無回包冷卻／清快取／關閉。既有 TCP 持續劣化監測及其他原有品質處置保留。
+
+本機 Smart 專項及 race 通過；`CGO_ENABLED=0 SKIP_CONCURRENT_TEST=1 SKIP_INTEROP_TEST=1 go test ./... -count=1` 與同命令加 `-tags with_gvisor` 均通過。完整套件測試沿用 CI 的並發／interop 跳過設定，未執行那些被跳過的情境。跨平台分發另由 release workflow 驗證；真實網路改善仍待更新後由使用者觀察。回退不保證所有出口切換都消失，也不把 GitHub 發佈成功當作路由器已更新的證據。
+
 ```bash
 go test ./adapter/outboundgroup -run 'TestSmart|TestShouldRecordSmartDialFailure' -count=1
 CGO_ENABLED=1 go test -race ./adapter/outboundgroup -run 'TestSmart|TestShouldRecordSmartDialFailure' -count=1
