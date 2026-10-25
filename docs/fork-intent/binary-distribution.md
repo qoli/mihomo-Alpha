@@ -56,6 +56,28 @@ ed1e6720499bd5efacd6799015516c59794e1bff7a3c9c6b05be50bb1c1c1586
 - tag 一致性檢查在 build 準備階段；它不是在發佈時對併發移動 tag 的鎖定保證。
 - 沒有對全部平台執行二進制；交叉編譯／打包成功不能等同每個裝置上的執行驗收。
 
+### 2026-10-25：DT-01 修正的 rolling 發佈
+
+[Build 40197198909](https://github.com/qoli/mihomo-Alpha/actions/runs/40197198909)
+對應 source `ab65458476de55da11da87e86586de9fee579cc8`，90 個 build 組合及 rolling
+Release／Docker jobs 成功；版本化 Release job 依原條件跳過。本次沒有驗收版本化 tag 路徑。
+
+- `Prerelease-Alpha` 的 tag／body Source commit 與來源一致，`version.txt` 為
+  `alpha-smart-ab65458`；128 個公開檔案中，126 個 checksum catalog 項目與 GitHub digest 一致。
+- 實際下載 `version.txt`、`checksums.txt` 與 Linux ARM64 gzip，校驗公開 digest、大小及
+  ARM64 checksum；gzip SHA-256 為
+  `2e99eeeae4b139efecfcdf00e9e2fbb80850fafeee9c56aaf134573ca9587b68`。
+- 解壓後 ARM64 binary SHA-256 為
+  `fae223331a5dfbb755572c6055661e04a0ea5181f7bc7b5b16b3b5d006d1dd62`，
+  Go build info 的 revision／Linux／ARM64 皆吻合。之後正式 router 一鍵更新完成，
+  活躍 executable SHA／controller 版本與此公開檔案一致；Safari 官方及本機99／96均完成
+  真實 FairPlay 授權與持續影格輸出，見 [DT-01 現場回驗](tcp-destination.md#正式發佈與現場回驗)。
+  不能把其餘平台的 digest catalog 校驗當成執行通過。
+- 安全證據位於 macOSAgentBot 的
+  `.runtime/viutv-live/cdn403-20261025/releases/mihomo-ab654584/public-assets-verification.json`。
+  rolling Release 的 `publishedAt` 保留首建日期；本次身分使用 source commit、版本、
+  workflow 與各資產 `updatedAt`／digest，而非以該日期反推版本。
+
 ## 同步上游的檢查點
 
 上游最容易覆蓋的區段是 `workflow_dispatch.inputs.version`、`Set variables`、兩個 Upload job 的 if／permissions／步驟、Docker 的 dispatch 條件，以及 README 下載目的地。

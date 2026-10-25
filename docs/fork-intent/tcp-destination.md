@@ -58,5 +58,39 @@ variant 為 FairPlay／SAMPLE-AES。沒有修改或驗證播放網址的密碼�
 `worker-121724/mapping-comparison/installed-cloudflare-auto.json` 及
 `candidate-cloudflare-auto.json`；主代理另以檔案 hash、TLS 與 HTTP 狀態獨立核對。
 
-目前尚未以候選替換正式核心。發布後須經正式 router 更新，再測原生 Mac／container
-取流與 Safari 99／96 的真實授權及影格輸出；記錄公開 binary SHA、更新結果與回滾來源。
+### 正式發佈與現場回驗
+
+[Build 40197198909](https://github.com/qoli/mihomo-Alpha/actions/runs/40197198909)
+對應修正 source `ab65458476de55da11da87e86586de9fee579cc8`，正式 rolling
+`version.txt` 為 `alpha-smart-ab65458`。下載與 checksum 核對見
+[分發記錄](binary-distribution.md#2026-10-25dt-01-修正的-rolling-發佈)。
+Linux ARM64 gzip SHA-256 為
+`2e99eeeae4b139efecfcdf00e9e2fbb80850fafeee9c56aaf134573ca9587b68`，
+解壓 executable SHA-256 為
+`fae223331a5dfbb755572c6055661e04a0ea5181f7bc7b5b16b3b5d006d1dd62`。
+
+使用者選擇正式發佈後更新。2026-10-25 22:13–22:22（UTC+8），既有 LuCI 的
+正式一鍵更新 RPC 完成，配合 Core v0.1.103 的 ViuTV 專用香港 leaf selector 及精確
+API sniff skip。最初瀏覽器 session 過期未建立任務，之後以既有可信 SSH 呼叫同一
+RPC 一次；不記為 GUI 成功。活躍 `/proc/<pid>/exe`、磁碟 SHA 與上述官方 executable
+一致，controller 版本相同，runtime／接管正常，保留訂閱配置、自訂網站及共享群組。
+訂閱 02 原有 HTTP403 保留快取並明示警告。
+
+暫時完整 user profile 在 fresh SHA 與新 builtin 的完整等價比較後移至原 rollback 目錄，
+正式 render 的配置 SHA 不變、既有驗證證明仍匹配新核心。profile 回到 builtin，沒有
+額外 reload。回滾材料保存在 router 原有本輪 `.runtime/router-release-update-pre-20261025T140516Z/`，
+隔離 helper／SSH forward／credential 副本已清理，並非正式服務依賴。
+
+重啟本次 OrbStack `viutv-live` 服務清除舊 IP 綁定 URL 後，原生 Mac99／container96
+provider probe 均 API 成功、主清單及 variant 可讀，FairPlay／SAMPLE-AES。
+真實 Safari 27.0.1 的官方99／96均有 `wrapperFP` POST200、`webkitKeys=true`，
+時間／影格分別 428.00→447.28秒／3960→4460 及 65.79→82.80秒／408→854。
+Docker 頁兩台各收到 `skd` 初始化，真實 SPC／CKC 請求／回覆1／1，
+99台56.07→65.85秒／377→767影格，96台64.55→86.61秒／414→1518影格，均無錯誤。
+本機流量的有限 MCP 觀測亦確認 API／CDN／授權走同一專用香港 leaf。
+
+安全證據位於 macOSAgentBot 的 `.runtime/viutv-live/cdn403-20261025/`：
+`safari-acceptance.json`、`router-release-update/`、`official-live-probes/`。
+QEMU 的 Core 升級選測只維持其原 PARTIAL；本次 Safari 現場成功不補齊 minimal、
+Meta、非法配置等未測契約。URL 到期重開與長時間續期待驗；其餘平台不由 ARM64 現場
+推定通過。先前 QUIC 失敗、DNS 實驗 ERROR 及舊403全部保留。

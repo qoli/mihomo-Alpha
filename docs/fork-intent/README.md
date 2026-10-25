@@ -27,7 +27,7 @@
 | SC-04 | 以保守的多連線證據處理持續劣化 | 已實作；訊號／證據／冷卻單元測試已通過，仍有整合驗證缺口 | [Smart 連線行為](smart-connections.md#sc-04-持續劣化監測) |
 | SC-05 | 用同一 trace 區分建連、首次寫讀與關閉 | 已實作；事件時間 helper 測試已通過 | [Smart 連線行為](smart-connections.md#sc-05-分階段診斷) |
 | CI-01 | fork 獨立產出可追溯的二進制分發 | 已實作；首次 rolling release 實跑通過，版本標籤路徑未實際發佈驗收 | [二進制分發](binary-distribution.md) |
-| DT-01 | TCP 保留 DNSMapping 的原始真實目的 IP | 已修正；SOCKS wire 與隔離真實 CDN 對照通過，正式 router／Safari 待驗 | [TCP 目的地址](tcp-destination.md) |
+| DT-01 | TCP 保留 DNSMapping 的原始真實目的 IP | 已修正；SOCKS wire、隔離 CDN 與正式 ARM64 router／Safari 官方及本機99／96實播通過；長時間續期待驗 | [TCP 目的地址](tcp-destination.md) |
 
 「已實作」表示核對過下列提交中的程式；不是對所有平台、所有真實流量情境的保證。各文件的驗證缺口屬於現況，不是本次新增的實作計畫。
 
