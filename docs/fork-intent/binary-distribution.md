@@ -1,6 +1,6 @@
 # CI-01：Alpha fork 二進制分發意圖
 
-狀態：已實作，核對至 `02c0eaf8`。首次 rolling release 實際完成；版本化 Release 目前只有設定、語法與版本邏輯驗證，未實際發佈。基準見[索引](README.md)。
+狀態：已實作；分發入口歷史核對至 `02c0eaf8`，2026-11-02 增加 Linux ARM64／AMD64-v1 的 UPX 包裝及本地候選驗證。首次 rolling release 實際完成；UPX GitHub CI 實跑及版本化 Release 尚未驗收。基準見[索引](README.md)。
 
 ## 目的與保留範圍
 
@@ -33,6 +33,9 @@
 7. **完整 build 才發佈。** Release jobs 保留 `needs: [build]`，任一 build 失敗就不開始 Release 替換。找不到宣告的上傳檔案時須失敗。
 8. **可下載及校驗。** Windows 保留 ZIP，其他二進制保留 GZIP，並保留上游套件／toolchain／vendor 輸出。rolling 與版本化 Release 都提供 `checksums.txt`；目前 hash 清單排除 `checksums.*` 及 `version.txt`，其餘檔案納入 SHA-256。
 9. **手動 rolling 不漏掉既有 Docker 流程。** 空白 version 的 dispatch 也走一般 Docker metadata／build 條件。Docker 與 Release 在 build 後並行，Docker 結果不代表二進制上傳結果。
+10. **UPX 是明確的平台包裝政策。** 僅預設 Go 的 Linux `arm64`、`amd64-v1` matrix entry 設 `upx: true`；其他架構、AMD64 別名及舊 Go 組合維持原包裝，不推論它們都適合 UPX。使用固定 [UPX 5.3.0](https://github.com/upx/upx/releases/tag/v5.3.0) 的 Linux AMD64 host 工具，下載 archive 的 SHA-256 固定為 `79cea8a50b6fa102d10c7b79a419cd77dead3cc2d78661de2dc5e5815dc505c1`。順序為 `go build` → `upx --no-env -9 --lzma` → `upx -t`／執行驗證 → GZIP／套件 → checksum；不改 `with_gvisor` 或 Go linker flags。啟用 job 任一步失敗即失敗，不退回未壓縮 binary。ARM64 透過 `qemu-aarch64`，AMD64 原生執行；壓縮前後核對完整 `-v`、版本／架構／`with_gvisor` 與獨立目錄中的 Smart 配置測試。最終 GZIP 再解包逐 byte 比對並做 `upx -t`。同一 job 的 DEB／RPM／Pacman 也使用已壓縮的 `mihomo`；Docker 建置保持原行為。
+
+每個 build artifact 包含封裝後的 `checksums.txt`，PR 候選也可獨立校驗。Release jobs 合併 artifacts 後仍重新產生完整 catalog，不能把 merge 過程中留下的單一 job catalog 當成 Release 的完整清單。UPX job summary 記錄當次 source SHA、版本、固定工具／參數及壓縮前後 executable bytes。
 
 rolling Release 的說明包含 source SHA；版本化 Release 使用 GitHub 自動 release notes，避免依賴上游 `Meta` 分支歷史及硬編碼比較連結。
 
@@ -77,6 +80,61 @@ Release／Docker jobs 成功；版本化 Release job 依原條件跳過。本次
   `.runtime/viutv-live/cdn403-20261025/releases/mihomo-ab654584/public-assets-verification.json`。
   rolling Release 的 `publishedAt` 保留首建日期；本次身分使用 source commit、版本、
   workflow 與各資產 `updatedAt`／digest，而非以該日期反推版本。
+
+### 2026-11-02：UPX 本地候選驗證（5ML-164，未發佈）
+
+核心 source 為 `e860c272f9d5fca5efebd1a5078b94c1e8802976`，版本
+`alpha-smart-e860c272`，BuildTime `2026-11-02T15:40:00Z`；本次僅修改 workflow 與意圖文件。
+使用 workflow 同來源的 MetaCubeX Go 1.26 toolchain（此次解析為 `go1.26.10 darwin/arm64`），
+交叉編譯時保留 `CGO_ENABLED=0`、`with_gvisor`、`-trimpath`、`-w -s -buildid=` 及 static linker flags。
+工具 archive `go1.26.darwin-arm64.tar.gz` 的 SHA-256 為
+`18ec7eefd48747a8e4b0bcbdb5303c3ba6d5ae4469ae9de3a65e58c6557ebf89`。
+同一份編譯結果保留原檔後，再用 UPX 5.3.0 `--no-env -9 --lzma` 壓縮：
+
+| 最終候選資產 | 原 executable bytes | UPX executable bytes | GZIP bytes | 安裝後節省 |
+| --- | ---: | ---: | ---: | ---: |
+| `mihomo-linux-arm64-alpha-smart-e860c272.gz` | 47,382,654 | 10,990,380 | 10,991,695 | 76.81% |
+| `mihomo-linux-amd64-v1-alpha-smart-e860c272.gz` | 51,859,582 | 13,542,964 | 13,544,912 | 73.89% |
+
+最終 GZIP 與逐 job catalog 的 SHA-256 核對通過：
+
+```text
+02481849c4bf0644ccbd56535072540637b3193a79de7c49c5fbf2d5cb6bf643  mihomo-linux-arm64-alpha-smart-e860c272.gz
+77253dec066d37fca44cd28085c69b9acc6eea27b8d7397d56cfc65bce89dd7f  mihomo-linux-amd64-v1-alpha-smart-e860c272.gz
+```
+
+已實際執行的範圍：
+
+- 從變更後 workflow 擷取 shell 執行，壓縮前後 `-v` 完全一致、保留 `with_gvisor`，
+  Smart group 配置在不同暫存目錄中 `-t` 成功；兩個 executable 與最終 GZIP 解出內容均通過 `upx -t`。
+  ARM64 在 ARM64 Linux 容器透過 QEMU user 8.2.2 執行，也直接原生執行；
+  AMD64 在 macOS ARM64 主機上的 Linux AMD64 容器模擬環境執行。這不是物理 AMD64 裝置的紀錄。
+  固定工具的下載／archive checksum／解包步驟亦在 Linux 執行成功；
+  使用 AMD64 host 版 UPX 壓縮同一 ARM64 原檔，與 ARM64 host 版輸出逐 byte 相同且 `upx -t` 通過。
+- localClash `bcfec32e355ceb2c935c5d4a94856afc437fc0a1` 的現有 checkout 編譯為兩個 Linux consumer。
+  checkout 有既有未提交修改，但 `internal/coredownload`、`internal/mihomotest` 及
+  `product_mihomo_update.go` 相對該提交沒有差異；本次未修改 consumer。
+  候選由本地 HTTP 服務提供 metadata／最終 GZIP，經 `core download --flavor smart --target router`
+  選到原有檔名並完成下載、GZIP 解包、chmod 及 rename，安裝結果與候選逐 byte 相同。
+  再由 `mihomo config-test --json` 取得兩架構 `passed: true`、`isolated: true`、`core_type: smart`；
+  來源目錄放置不可用的 `cache.db` 仍通過且該檔保持原內容，未借用 live runtime。
+- actionlint v1.7.12 與全部 build shell 的 `bash -n` 通過。以解析後 YAML 比對原 workflow，
+  90 個 matrix entry 去掉新增的兩個 `upx` flag 後完全相同；事件、版本準備、權限、
+  Release／Docker jobs 及其完整 build gate 保持原內容。
+- 另以同 source／toolchain 交叉建置 Darwin ARM64 與 Windows AMD64-v1，執行拆出的原包裝步驟。
+  GZIP／ZIP 解出內容與各自未經 UPX 的原檔完全相同、最終 catalog 核對通過；Darwin `-v` 實際通過。
+  Windows 僅建置與打包，未執行 Windows binary。注入 packer 失敗的 shell 邊界檢查回傳原 exit 13，
+  未寫成功 summary 或繼續封裝；這是 CI 錯誤傳遞檢查，不是裝置功能驗收。
+
+參數取捨：ARM64 的 `-9 --no-lzma` 對照為 13,964,068 bytes，壓縮約 46.4 秒；
+`-9 --lzma` 為 10,990,380 bytes，包含壓縮及前後 QEMU 執行檢查約 35.4 秒。
+同一原生 ARM64 Linux 容器各執行五次 `-v`，中位耗時為原檔 3.33 ms、NRV 165.90 ms、
+LZMA 582.33 ms。為本任務的儲存目標選 LZMA；此短樣本不代表低階路由器的啟動或記憶體成本。
+
+驗證邊界：這是本地候選與下載／配置測試的相容性驗證，未啟動 GitHub Actions、推送或公開發佈。
+未重跑全部 90 平台建置、套件安裝、完整 iStoreOS 一鍵更新／接管流程或真實路由器流量；
+未更新 localClash 功能表的實測版本，也不宣稱支援特定小閃存裝置。
+歷史 rolling 發佈證據維持原日期與範圍，不能用來宣稱本次 UPX 已公開驗收。
 
 ## 同步上游的檢查點
 

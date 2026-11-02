@@ -37,10 +37,10 @@ jobs:
           - { goos: linux, goarch: '386', go386: softfloat, output: '386-softfloat' }
           - { goos: linux, goarch: amd64, goamd64: v1, output: amd64-compatible} # old style file name will be removed in next released
           - { goos: linux, goarch: amd64, goamd64: v3, output: amd64, debian: amd64, rpm: x86_64, pacman: x86_64, tarball: tarball}
-          - { goos: linux, goarch: amd64, goamd64: v1, output: amd64-v1, debian: amd64, rpm: x86_64, pacman: x86_64, test: test }
+          - { goos: linux, goarch: amd64, goamd64: v1, output: amd64-v1, debian: amd64, rpm: x86_64, pacman: x86_64, test: test, upx: true }
           - { goos: linux, goarch: amd64, goamd64: v2, output: amd64-v2, debian: amd64, rpm: x86_64, pacman: x86_64}
           - { goos: linux, goarch: amd64, goamd64: v3, output: amd64-v3, debian: amd64, rpm: x86_64, pacman: x86_64}
-          - { goos: linux, goarch: arm64, output: arm64, debian: arm64, rpm: aarch64, pacman: aarch64}  
+          - { goos: linux, goarch: arm64, output: arm64, debian: arm64, rpm: aarch64, pacman: aarch64, upx: true }
           - { goos: linux, goarch: arm, goarm: '5', output: armv5 }
           - { goos: linux, goarch: arm, goarm: '6', output: armv6, debian: armel, rpm: armv6hl} 
           - { goos: linux, goarch: arm, goarm: '7', output: armv7, debian: armhf, rpm: armv7hl, pacman: armv7hl}
@@ -262,8 +262,76 @@ jobs:
         GOARM: ${{matrix.jobs.goarm}}
         GOMIPS: ${{matrix.jobs.gomips}}
       run: |
+        set -euo pipefail
         go env
         go build -v -tags "with_gvisor" -trimpath -ldflags "${BUILDTAG} -X 'github.com/metacubex/mihomo/constant.Version=${VERSION}' -X 'github.com/metacubex/mihomo/constant.BuildTime=${BUILDTIME}' -w -s -buildid="
+
+    - name: Set up pinned UPX
+      if: ${{ matrix.jobs.upx == true }}
+      env:
+        UPX_VERSION: '5.3.0'
+        UPX_SHA256: '79cea8a50b6fa102d10c7b79a419cd77dead3cc2d78661de2dc5e5815dc505c1'
+      run: |
+        set -euo pipefail
+        archive="$RUNNER_TEMP/upx.tar.xz"
+        curl --fail --location --show-error --silent \
+          "https://github.com/upx/upx/releases/download/v${UPX_VERSION}/upx-${UPX_VERSION}-amd64_linux.tar.xz" \
+          --output "$archive"
+        echo "$UPX_SHA256  $archive" | sha256sum --check -
+        mkdir -p "$RUNNER_TEMP/upx"
+        tar -xJf "$archive" --strip-components=1 -C "$RUNNER_TEMP/upx"
+        "$RUNNER_TEMP/upx/upx" --version
+        echo "$RUNNER_TEMP/upx" >> "$GITHUB_PATH"
+
+    - name: Set up ARM64 execution
+      if: ${{ matrix.jobs.upx == true && matrix.jobs.goarch == 'arm64' }}
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y --no-install-recommends qemu-user
+
+    - name: Compress and verify core
+      if: ${{ matrix.jobs.upx == true }}
+      env:
+        TARGET_ARCH: ${{ matrix.jobs.goarch }}
+      run: |
+        set -euo pipefail
+        runner=()
+        if [ "$TARGET_ARCH" = arm64 ]; then
+          runner=(qemu-aarch64)
+        fi
+        check_dir="$(mktemp -d "$RUNNER_TEMP/mihomo-upx.XXXXXX")"
+        trap 'rm -rf "$check_dir"' EXIT
+        cat > "$check_dir/config.yaml" <<'EOF'
+        mode: rule
+        log-level: error
+        proxy-groups:
+          - name: UPX-Smoke
+            type: smart
+            proxies: [DIRECT]
+        rules:
+          - MATCH,UPX-Smoke
+        EOF
+        "${runner[@]}" ./mihomo -v | tee "$check_dir/version-before.txt"
+        grep -F "Mihomo Meta ${VERSION} linux ${TARGET_ARCH} with " "$check_dir/version-before.txt"
+        grep -F 'with_gvisor' "$check_dir/version-before.txt"
+        "${runner[@]}" ./mihomo -d "$check_dir/before" -f "$check_dir/config.yaml" -t
+        before_bytes="$(stat -c %s mihomo)"
+        upx --no-env -9 --lzma mihomo
+        upx --no-env -t mihomo
+        after_bytes="$(stat -c %s mihomo)"
+        "${runner[@]}" ./mihomo -v | tee "$check_dir/version-after.txt"
+        cmp "$check_dir/version-before.txt" "$check_dir/version-after.txt"
+        "${runner[@]}" ./mihomo -d "$check_dir/after" -f "$check_dir/config.yaml" -t
+        {
+          echo "### UPX linux-${{ matrix.jobs.output }}"
+          echo "Source: $GITHUB_SHA; version: $VERSION"
+          echo 'UPX 5.3.0; parameters: --no-env -9 --lzma'
+          echo "Executable bytes: $before_bytes -> $after_bytes"
+        } >> "$GITHUB_STEP_SUMMARY"
+
+    - name: Package core
+      run: |
+        set -euo pipefail
         if [ "${{matrix.jobs.goos}}" = "windows" ]; then
           cp mihomo.exe mihomo-${{matrix.jobs.goos}}-${{matrix.jobs.output}}.exe
           zip -r mihomo-${{matrix.jobs.goos}}-${{matrix.jobs.output}}-${VERSION}.zip mihomo-${{matrix.jobs.goos}}-${{matrix.jobs.output}}.exe
@@ -272,6 +340,16 @@ jobs:
           gzip -c mihomo-${{matrix.jobs.goos}}-${{matrix.jobs.output}} > mihomo-${{matrix.jobs.goos}}-${{matrix.jobs.output}}-${VERSION}.gz
           rm mihomo-${{matrix.jobs.goos}}-${{matrix.jobs.output}}
         fi
+
+    - name: Verify packaged UPX core
+      if: ${{ matrix.jobs.upx == true }}
+      run: |
+        set -euo pipefail
+        unpacked="$(mktemp "$RUNNER_TEMP/mihomo-packaged.XXXXXX")"
+        trap 'rm -f "$unpacked"' EXIT
+        gzip -dc "mihomo-${{matrix.jobs.goos}}-${{matrix.jobs.output}}-${VERSION}.gz" > "$unpacked"
+        cmp mihomo "$unpacked"
+        upx --no-env -t "$unpacked"
 
     - name: Package DEB
       if: matrix.jobs.debian != ''
@@ -332,6 +410,15 @@ jobs:
       run: |
         echo ${VERSION} > version.txt
       shell: bash
+
+    - name: Checksum production artifacts
+      run: |
+        set -euo pipefail
+        find . -maxdepth 1 -type f \( -name 'mihomo*.gz' -o -name 'mihomo*.deb' \
+          -o -name 'mihomo*.rpm' -o -name 'mihomo*.pkg.tar.zst' -o -name 'mihomo*.zip' \
+          -o -name 'toolchain.tar.gz' -o -name 'vendor.tar.gz' \) \
+          -print0 | sort -z | xargs -0 sha256sum > checksums.txt
+        sha256sum --check checksums.txt
 
     - name: Archive production artifacts
       uses: actions/upload-artifact@v7
