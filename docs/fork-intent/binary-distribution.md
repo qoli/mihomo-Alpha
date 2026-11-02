@@ -1,6 +1,6 @@
 # CI-01：Alpha fork 二進制分發意圖
 
-狀態：已實作；分發入口歷史核對至 `02c0eaf8`，2026-11-02 增加 Linux ARM64／AMD64-v1 的 UPX 包裝及本地候選驗證。首次 rolling release 實際完成；UPX GitHub CI 實跑及版本化 Release 尚未驗收。基準見[索引](README.md)。
+狀態：已實作；分發入口歷史核對至 `02c0eaf8`，2026-11-02 增加 Linux ARM64／AMD64-v1 的 UPX 包裝，2026-11-03 完成 UPX Build workflow 與公開 rolling 資產驗證。獨立 Test 有 macOS runner 容量取消，版本化 Release 尚未驗收。基準見[索引](README.md)。
 
 ## 目的與保留範圍
 
@@ -135,6 +135,63 @@ LZMA 582.33 ms。為本任務的儲存目標選 LZMA；此短樣本不代表低�
 未重跑全部 90 平台建置、套件安裝、完整 iStoreOS 一鍵更新／接管流程或真實路由器流量；
 未更新 localClash 功能表的實測版本，也不宣稱支援特定小閃存裝置。
 歷史 rolling 發佈證據維持原日期與範圍，不能用來宣稱本次 UPX 已公開驗收。
+
+### 2026-11-03：UPX GitHub Build 與公開 rolling 資產驗證
+
+來源提交 `73af7fcdae639b8fce3facdae3477079b48bcbc9` 已 push 到 `Alpha`。
+[Build 41476809468](https://github.com/qoli/mihomo-Alpha/actions/runs/41476809468)
+為 push 觸發、attempt 1；90 個 build 組合、Upload-Prerelease 及 Docker 均成功，
+版本化 Upload-Release 依事件條件跳過。Build workflow 結論為 `success`。
+未因排程或 runner 問題刪減平台／Go 矩陣。
+
+CI 使用 Go 1.26.10、`with_gvisor`、固定 UPX 5.3.0 `--no-env -9 --lzma`，實測如下：
+
+| 公開 GZIP 資產 | 原 executable bytes | UPX executable bytes | GZIP bytes | 安裝後節省 |
+| --- | ---: | ---: | ---: | ---: |
+| `mihomo-linux-arm64-alpha-smart-73af7fc.gz` | 47,579,262 | 11,092,472 | 11,093,842 | 76.69% |
+| `mihomo-linux-amd64-v1-alpha-smart-73af7fc.gz` | 52,039,806 | 13,643,132 | 13,645,024 | 73.78% |
+
+兩個目標 job 的壓縮前後版本核對、`upx -t`、實際 `-v` 及隔離 Smart 配置測試均成功；
+ARM64 在 GitHub AMD64 runner 上透過 `qemu-aarch64` 執行，AMD64-v1 原生執行。
+下載固定 run 的兩份 artifact 後，其 GZIP、DEB、RPM、Pacman 共八個檔案與各自 catalog
+核對通過；未把套件 checksum 核對視為套件安裝驗收。
+
+公開 [Prerelease-Alpha](https://github.com/qoli/mihomo-Alpha/releases/tag/Prerelease-Alpha)
+tag、Release body 的 Source commit、`version.txt`（`alpha-smart-73af7fc`）與來源一致。
+從該 source 的 matrix 推導資產集合，與公開的 128 個資產完全相同；
+`checksums.txt` 的 126 個 payload 項目與 GitHub asset digest 全部相符。
+另實際下載 `version.txt`、`checksums.txt` 及兩個 Linux GZIP，核對各自公開 digest；
+兩個 GZIP 與固定 run 的 artifact 逐 byte 相同。
+
+```text
+44aae90e7749192e4e6882e726706a95adf31a4c87a22ea918b7b29db889829c  mihomo-linux-arm64-alpha-smart-73af7fc.gz
+0be88b56d64376fb6876afe25ef321309545acd2285f5ce16acc042739a1ccf0  mihomo-linux-amd64-v1-alpha-smart-73af7fc.gz
+```
+
+解出後 ARM64 executable SHA-256 為
+`b824cc9f9282a90e1294a62929316c35ab7909cc9a573a96d6a59475f14051f0`，
+AMD64-v1 為 `255d46169c8a1e8e700a75ab89809aeb519470b331f9cc2dbac633b07fb85c92`。
+從兩個 UPX binary 還原後讀取 Go build info，revision 均為上述 source，平台分別為 Linux
+ARM64 與 Linux AMD64／GOAMD64=v1。build info 同時記錄 `vcs.modified=true`；
+workflow 在編譯前既有的 Update CA 步驟會更新倉庫內 CA 輸入，不能將這份紀錄稱為 clean-tree
+可重建證明。來源身分同時由 run／tag／版本／revision／最終資產 hash 核對。
+
+再從真實公開 Release 經既有 localClash `core download --flavor smart --target router`
+下載兩個目標，保留產品選檔、GZIP 解包、chmod 及 rename 路徑；安裝結果與公開 GZIP 解出內容
+完全相同。兩者在相應 Linux 容器執行 `upx -t`、`-v`，並透過正式 `mihomo config-test --json`
+取得 `passed: true`、`isolated: true`、`core_type: smart`。這次使用真實 GitHub metadata／下載，
+不是前節的本地候選 HTTP 服務；consumer 沿用前節記錄的 checkout，未修改 consumer 程式。
+原始證據保存在本機暫存 `/tmp/mihomo-upx-ci.tewnfx/`，包括資產核驗 JSON、catalog、job log、
+artifact、來源 build info 與隔離 config-test 結果；此路徑不是永久下載入口。
+
+獨立 [Test 41476809542](https://github.com/qoli/mihomo-Alpha/actions/runs/41476809542)
+attempt 1 的 workflow 結論為 `failure`：36 個 job 成功，6 個 `macos-latest` job 被取消。
+逐一讀取六個 check-run annotations，皆為 hosted runner 多次嘗試仍未取得，以及 macOS ARM64
+runner 容量不足；取消的 job 沒有 runner 或測試步驟。未把這六項列為程式測試通過，
+也不將 Build／公開產物通過寫成整體 Test 全綠。
+
+這輪沒有執行套件安裝、真實路由器啟動／記憶體成本、完整 iStoreOS 更新／接管或真實流量驗收，
+不提高 localClash 功能表的實測版本。版本化 tag 發佈路徑仍保留原驗證缺口。
 
 ## 同步上游的檢查點
 
