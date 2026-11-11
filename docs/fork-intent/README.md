@@ -26,6 +26,7 @@
 | SC-03 | 區分節點故障、競速取消與 HTTP 端點政策 | 已實作；分類 helper 測試已通過 | [Smart 連線行為](smart-connections.md#sc-03-避免把取消與端點政策當成節點故障) |
 | SC-04 | 以保守的多連線證據處理持續劣化 | 已實作；訊號／證據／冷卻單元測試已通過，仍有整合驗證缺口 | [Smart 連線行為](smart-connections.md#sc-04-持續劣化監測) |
 | SC-05 | 用同一 trace 區分建連、首次寫讀與關閉 | 已實作；事件時間 helper 測試已通過 | [Smart 連線行為](smart-connections.md#sc-05-分階段診斷) |
+| SC-06 | TCP DoH 遇到 TLS 或回應靜默時，在同一筆查詢內試用同組 Smart 備援 | 已實作，macOS 50 候選離線回驗通過 | [Smart 連線行為](smart-connections.md#sc-06-tcp-doh-查詢內切換備援) |
 | CI-01 | fork 獨立產出可追溯的二進制分發 | 已實作；UPX 90 組 build、rolling／Docker 及公開資產核驗通過；獨立 Test 有 macOS runner 容量取消，版本標籤發佈待驗 | [二進制分發](binary-distribution.md) |
 | DT-01 | TCP 保留 DNSMapping 的原始真實目的 IP | 已修正；SOCKS wire、隔離 CDN 與正式 ARM64 router／Safari 官方及本機99／96實播通過；長時間續期待驗 | [TCP 目的地址](tcp-destination.md) |
 

@@ -118,6 +118,20 @@ HTTP 政策判定同時用於 `checkNodeQuality` 與 `checkHostStatus` 的恢復
 
 **驗證：** [observability tests](../../adapter/outboundgroup/smart_observability_test.go) 覆蓋階段差值、first-write 缺失明確標記與錯誤值。程式以 CompareAndSwap 保留首次寫入時間，但目前沒有重複 first-write 的針對性測試；其他缺口包括完整 wrapper callback、真實連線 debug log 及所有 relay 解包路徑。
 
+## SC-06 TCP DoH 查詢內切換備援
+
+TCP DoH 的 TLS 或 DNS 回應可能在 proxy CONNECT 已成功後卡住。這時 Smart 一般 TCP 路徑已完成撥號選擇，DoH 仍需保留時間完成備援的 CONNECT、TLS 與 DNS 交換。
+
+- 適用於明確指定 Smart 或經 `select` 鏈選到自動 Smart 的 HTTPS HTTP/1.1 與 HTTP/2 上游。固定 Smart 成員、其他分組類型及 HTTP/3 沿用各自的選路。
+- 主請求耗用查詢期限的一半後，若已取得 TCP 連線或使用既有 HTTP 連線且尚未得到結果，啟動一次同上游的備援交換。兩路共用原查詢期限，先取得可用 DNS 回應的一路完成查詢。原請求可在備援等待期間繼續接收回應。
+- Smart 用現有排序和並行撥號選出備援。排序以同組的健康候選為輸入，排除本次卡住的成員與內建直連／拒絕節點，遵守組內封鎖和冷卻。
+- 備援有效回覆可替換該 DoH 上游的 HTTP client，讓後續查詢重用新連線。替換須確認原 client 和選路仍是當前版本。舊 transport 的活動請求可繼續完成。一般 TCP／UDP 的 Smart winner 仍由 SC-02 的共用選舉管理。
+- 這次無回應只影響該筆查詢的備援選擇。失敗或取消保留原查詢期限和錯誤，節點品質監測仍依 SC-03、SC-04 的條件處理。
+
+[DoH 交換](../../dns/doh_smart.go)以同一 retry ID 記錄開始備援、Smart 完成排序、備援撥號完成與收到有效 DoH。現有 [Smart 連線診斷](#sc-05-分階段診斷)仍以 TCP tracker 為範圍。備援撥號及分組銜接見 [Smart 備援](../../adapter/outboundgroup/smart_doh.go) 和 [DNS 路由](../../tunnel/dns_smart.go)。
+
+2026-11-11 在 macOS arm64 上以相同 50 候選及 HTTP/2 測試端點重跑三輪。已快取出口的 TLS 靜默、重用連線的 DoH 靜默及冷連線 TLS 靜默，各 3/3 筆均在約 2.54 秒收到同一查詢的備援答案。另驗證固定成員、兩路靜默、原請求較慢但可成功，以及備援成功時另一筆並行請求仍可在原連線完成。端點與延遲為 loopback 模擬，正式出口上的表現待實機驗證。
+
 ## 驗證入口
 
 ### 2026-09-22 UDP 回退記錄

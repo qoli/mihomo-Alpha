@@ -28,6 +28,10 @@ func NewDNSDialer(r resolver.Resolver, proxyAdapter C.ProxyAdapter, proxyName st
 }
 
 func (d *DNSDialer) DialContext(ctx context.Context, network, addr string) (net.Conn, error) {
+	return d.dialContext(ctx, network, addr, DoHRoute{}, 0)
+}
+
+func (d *DNSDialer) dialContext(ctx context.Context, network, addr string, failed DoHRoute, trace uint64) (net.Conn, error) {
 	r := d.r
 	proxyName := d.proxyName
 	proxyAdapter := d.proxyAdapter
@@ -79,23 +83,24 @@ func (d *DNSDialer) DialContext(ctx context.Context, network, addr string) (net.
 	}
 
 	if metadata.NetWork == C.TCP {
-		if proxyAdapter == nil {
-			opts = append(opts, dialer.WithResolver(r))
-			return dialer.DialContext(ctx, network, addr, opts...)
-		}
-
-		if proxyAdapter.IsL3Protocol(metadata) { // L3 proxy should resolve domain before to avoid loopback
-			if !metadata.Resolved() {
-				dstIP, err := resolver.ResolveIPWithResolver(ctx, metadata.Host, r)
-				if err != nil {
+		var conn C.Conn
+		if failed.group != nil {
+			conn, err = d.dialDoHBackup(ctx, proxyAdapter, metadata, failed, trace)
+			if proxyAdapter == nil {
+				return nil, err
+			}
+		} else {
+			if proxyAdapter == nil {
+				opts = append(opts, dialer.WithResolver(r))
+				return dialer.DialContext(ctx, network, addr, opts...)
+			}
+			if proxyAdapter.IsL3Protocol(metadata) {
+				if err := d.resolveDNSDestination(ctx, metadata); err != nil {
 					return nil, err
 				}
-				metadata.DstIP = dstIP
 			}
-			metadata.Host = "" // clear host to avoid double resolve in proxy
+			conn, err = proxyAdapter.DialContext(ctx, metadata)
 		}
-
-		conn, err := proxyAdapter.DialContext(ctx, metadata)
 		if err != nil {
 			logMetadataErr(metadata, rule, proxyAdapter, err)
 			return nil, err
@@ -126,6 +131,20 @@ func (d *DNSDialer) DialContext(ctx context.Context, network, addr string) (net.
 		return N.NewBindPacketConn(packetConn, metadata.UDPAddr()), nil
 	}
 
+}
+
+// L3 DNS routes must resolve the destination with the bootstrap resolver to
+// avoid a lookup through the DNS client that is currently dialing.
+func (d *DNSDialer) resolveDNSDestination(ctx context.Context, metadata *C.Metadata) error {
+	if !metadata.Resolved() {
+		dstIP, err := resolver.ResolveIPWithResolver(ctx, metadata.Host, d.r)
+		if err != nil {
+			return err
+		}
+		metadata.DstIP = dstIP
+	}
+	metadata.Host = ""
+	return nil
 }
 
 func (d *DNSDialer) ListenPacket(ctx context.Context, network, addr string) (net.PacketConn, error) {

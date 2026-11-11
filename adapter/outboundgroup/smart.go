@@ -82,7 +82,7 @@ type Smart struct {
 	cancel                 context.CancelFunc
 
 	configName             string
-	selected               string
+	selected               atomic.TypedValue[string]
 	testUrl                string
 	expectedStatus         string
 	disableUDP             bool
@@ -276,7 +276,7 @@ func (s *Smart) groupDialFailed(proxies []C.Proxy, err error) {
 
 func (s *Smart) prepareDialSelection(ctx context.Context, metadata *C.Metadata) (smartDialSelection, error) {
 	allProxies := s.GetProxies(true)
-	proxies, asnNumber, state := s.selectProxiesWithState(metadata, allProxies, false)
+	proxies, asnNumber, state := s.selectProxiesWithState(metadata, allProxies, smartSelectionOptions{})
 	selection := smartDialSelection{
 		proxies:       proxies,
 		asnNumber:     asnNumber,
@@ -292,7 +292,7 @@ func (s *Smart) prepareDialSelection(ctx context.Context, metadata *C.Metadata) 
 
 	flight, leader := s.selectionCoordinator.begin(state.key)
 	if leader {
-		freshProxies, freshASN, _ := s.selectProxiesWithState(metadata, allProxies, true)
+		freshProxies, freshASN, _ := s.selectProxiesWithState(metadata, allProxies, smartSelectionOptions{fresh: true})
 		if len(freshProxies) == 0 {
 			err := fmt.Errorf("smart selection has no fresh proxy for %s", metadata.SmartTarget)
 			s.selectionCoordinator.finish(state.key, flight, "", err)
@@ -501,9 +501,9 @@ func (s *Smart) Unwrap(metadata *C.Metadata, touch bool) C.Proxy {
 		return proxies[0]
 	}
 
-	if s.selected != "" {
+	if selected := s.selected.Load(); selected != "" {
 		for _, p := range proxies {
-			if p.Name() == s.selected {
+			if p.Name() == selected {
 				return p
 			}
 		}
@@ -595,17 +595,17 @@ func (s *Smart) Set(name string) error {
 }
 
 func (s *Smart) ForceSet(name string) {
-	s.selected = name
+	s.selected.Store(name)
 }
 
 func (s *Smart) Now() string {
-	if s.selected != "" {
+	if selected := s.selected.Load(); selected != "" {
 		for _, p := range s.GetProxies(false) {
-			if p.Name() == s.selected {
+			if p.Name() == selected {
 				return p.Name()
 			}
 		}
-		s.selected = ""
+		s.selected.CompareAndSwap(selected, "")
 	}
 
 	return "Smart - Select"
@@ -632,7 +632,7 @@ func (s *Smart) MarshalJSON() ([]byte, error) {
 		"all":             all,
 		"testUrl":         s.testUrl,
 		"expectedStatus":  s.expectedStatus,
-		"fixed":           s.selected,
+		"fixed":           s.selected.Load(),
 		"hidden":          s.Hidden(),
 		"icon":            s.Icon(),
 		"emptyFallback":   s.EmptyFallback().Name(),
@@ -653,7 +653,7 @@ func (s *Smart) Proxies() []C.Proxy {
 	return s.GetProxies(false)
 }
 
-func (s *Smart) filterProxies(metadata *C.Metadata, wildcardTarget string, names []string, weights []float64, all []C.Proxy, minCount int, isUDP bool) []C.Proxy {
+func (s *Smart) filterProxies(metadata *C.Metadata, wildcardTarget string, names []string, weights []float64, all []C.Proxy, minCount int, isUDP, strictHealth bool) []C.Proxy {
 	blockedNodes := s.store.GetBlockedNodes(s.Name(), s.configName)
 	wtFailNodes, _, _, wtBlocked := s.store.GetHostStatus(s.Name(), s.configName, wildcardTarget, s.hostFailLimit, metadata.SmartTarget)
 	activeCooling := func(name string) bool {
@@ -811,7 +811,7 @@ func (s *Smart) filterProxies(metadata *C.Metadata, wildcardTarget string, names
 		}
 	}
 
-	if len(selected) == 0 {
+	if len(selected) == 0 && !strictHealth {
 		fallbackAll := defaultSort(slices.Clone(all))
 		for _, p := range fallbackAll {
 			if activeCooling(p.Name()) {
@@ -856,7 +856,7 @@ func (s *Smart) filterProxies(metadata *C.Metadata, wildcardTarget string, names
 }
 
 // node selection
-func (s *Smart) selectProxiesWithState(metadata *C.Metadata, proxies []C.Proxy, fresh bool) ([]C.Proxy, string, smartProxySelectionState) {
+func (s *Smart) selectProxiesWithState(metadata *C.Metadata, proxies []C.Proxy, opts smartSelectionOptions) ([]C.Proxy, string, smartProxySelectionState) {
 	// attach ASN info
 	asnNumber := s.getASNCode(metadata)
 	wildcardTarget := smart.GetEffectiveTarget(metadata.Host, metadata.DstIP.String())
@@ -868,9 +868,9 @@ func (s *Smart) selectProxiesWithState(metadata *C.Metadata, proxies []C.Proxy, 
 		key: smartSelectionFlightKey(s.configName, s.Name(), metadata.SmartTarget),
 	}
 
-	if s.selected != "" {
+	if selected := s.selected.Load(); selected != "" {
 		for _, p := range proxies {
-			if p.Name() == s.selected {
+			if p.Name() == selected {
 				state.fixed = true
 				return []C.Proxy{p}, asnNumber, state
 			}
@@ -890,7 +890,7 @@ func (s *Smart) selectProxiesWithState(metadata *C.Metadata, proxies []C.Proxy, 
 
 	trySelector := func(isUDP bool) ([]string, []float64) {
 		// check the unwrap cache
-		if !fresh {
+		if !opts.fresh {
 			if proxiesName, expired := s.store.GetUnwrapResult(s.Name(), s.configName, metadata.SmartTarget, asnNumber, metadata.WildcardTarget); len(proxiesName) > 0 {
 				state.cacheHit = true
 				state.cacheExpired = expired
@@ -905,13 +905,13 @@ func (s *Smart) selectProxiesWithState(metadata *C.Metadata, proxies []C.Proxy, 
 
 	isUDP := metadata.NetWork == C.UDP
 	resultNames, resultWeights := trySelector(isUDP)
-	result := s.filterProxies(metadata, wildcardTarget, resultNames, resultWeights, proxies, maxSelected, isUDP)
+	result := s.filterProxies(metadata, wildcardTarget, resultNames, resultWeights, proxies, maxSelected, isUDP, opts.strictHealth)
 
 	return result, asnNumber, state
 }
 
 func (s *Smart) selectProxies(metadata *C.Metadata, proxies []C.Proxy) ([]C.Proxy, string) {
-	selected, asnNumber, _ := s.selectProxiesWithState(metadata, proxies, false)
+	selected, asnNumber, _ := s.selectProxiesWithState(metadata, proxies, smartSelectionOptions{})
 	return selected, asnNumber
 }
 
@@ -1797,7 +1797,7 @@ func (s *Smart) checkNodeQuality(
 	connectionDuration int64, uploadTotal, downloadTotal float64,
 	networkType string, asnNumber string, isUDP bool, lossRate, emaLossRate float64) (float64, bool, bool, int64) {
 
-	if s.selected != "" {
+	if s.selected.Load() != "" {
 		return newWeight, false, false, 0
 	}
 

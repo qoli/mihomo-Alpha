@@ -12,6 +12,11 @@ import (
 
 var errSmartSelectionMissingWinner = errors.New("smart selection completed without a winner")
 
+type smartSelectionOptions struct {
+	fresh        bool
+	strictHealth bool
+}
+
 type smartProxySelectionState struct {
 	key          string
 	cacheHit     bool
