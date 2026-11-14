@@ -48,6 +48,16 @@ type TrackerInfo struct {
 	RulePayload     string       `json:"rulePayload"`
 	MaxUploadRate   atomic.Int64 `json:"maxUploadRate"`
 	MaxDownloadRate atomic.Int64 `json:"maxDownloadRate"`
+	closeDegraded   atomic.Bool
+}
+
+func (info *TrackerInfo) ClosedForDegradation() bool {
+	return info.closeDegraded.Load()
+}
+
+func CloseDegraded(tracker Tracker) error {
+	tracker.Info().closeDegraded.Store(true)
+	return tracker.Close()
 }
 
 type tcpTracker struct {

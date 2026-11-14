@@ -59,12 +59,10 @@ type smartSelectionCoordinator struct {
 	flights map[string]*smartSelectionFlight
 }
 
-func smartSelectionFlightKey(config, group, target string) string {
-	// StoreUnwrapResult persists one winner per config/group/SmartTarget. The
-	// in-flight key must use the same identity: ASN can differ between parallel
-	// connections before DNS/CDN metadata settles, but those calls still share
-	// the target-level winner.
-	return smart.FormatDBKey(config, group, target)
+func smartSelectionFlightKey(config, group, cacheTarget string) string {
+	// The election uses the same target key as the winner cache even when
+	// parallel connections resolve different ASN metadata.
+	return smart.FormatDBKey(config, group, cacheTarget)
 }
 
 func smartDialBatchBounds(total, iteration int, leader bool) (int, int) {

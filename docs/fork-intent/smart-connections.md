@@ -24,7 +24,7 @@
 
 **必須保留：**
 
-- 對需要重新選路的請求，以 `configName + groupName + SmartTarget` 協調同一輪選舉。這必須對齊 `StoreUnwrapResult` 的 target 級 cache 身分；不能因 ASN 不同而為同一 target 建立互相競爭的選舉。
+- 需要重新選路的請求以設定、群組及 winner 快取的 target key 共用一輪選舉。一般流量使用 `SmartTarget`，影片 CDN 在同一 `SmartTarget` 下按 TCP 和 UDP 各自選舉。ASN 差異不拆開同一輪選舉。
 - 一輪中只有 leader 以成功撥號結果發佈新的 winner。follower 使用可用的舊結果或等待 leader；不得在完成自己的撥號後覆蓋新 winner。
 - 不再由過期 cache 的背景排名刷新直接寫入候選列表，也不因任意一次撥號失敗就無條件清除共用 unwrap cache。
 - leader 失敗、等待取消、winner 缺失或 winner 已不在候選 provider 中，都須向呼叫者返回明確錯誤；不任意替換成未經本輪選擇的節點。
@@ -41,7 +41,9 @@
 
 TCP leader 第一批競速完整的有界候選集，目前 `maxSelected=10`，不讓所有等待者承受第一個節點逾時後才開始下一批。一般非 leader 的批次方法為首個節點，再以 `parallelDials=5` 分批，受 `maxRetries=3` 限制。UDP 共用同一 coordinator，但保留自身的順序嘗試／重試方式，不宣稱與 TCP 有相同競速方式。
 
-**實作限制：** key 沒有 ASN，也沒有 TCP／UDP 維度；跨協議使用 winner 的 provider 能力、provider 更新期間的快照差異，需要人工檢查。follower 的「舊 winner」實際是篩選後的第一個候選；cache 名稱已失效或被過濾時，不保證仍是原節點。協調器不是永久鎖：一輪 finish 後移除 flight，後續必要時可以開始新一輪。
+**實作限制**
+
+一般流量共用 TCP 與 UDP 的 winner。跨協定時需要檢查 provider 能力，provider 熱更新期間也可能取得不同快照。follower 取得可用快取時，會使用篩選後的第一個候選。每輪結束後移除進行中的選舉記錄，讓後續請求可發起新一輪。
 
 **驗證：** [selection tests](../../adapter/outboundgroup/smart_selection_test.go) 覆蓋 key、TCP 批次、64 個並發呼叫共用 winner、錯誤傳遞、缺失 winner 及等待取消。這些是 helper／coordinator 測試；沒有涵蓋完整的 `prepareDialSelection`＋真實 TCP／UDP 撥號、過期 cache 競爭或 provider 熱更新。
 
@@ -64,7 +66,9 @@ HTTP 政策判定同時用於 `checkNodeQuality` 與 `checkHostStatus` 的恢復
 
 **目的：** 在保留正常連線的同時，為已建立但持續低吞吐的連線提供可解釋、有範圍的處理機制。一次慢回應或多條同時等待的連線不足以確認節點劣化。
 
-**納入範圍：** `monitorActiveConnection` 只包裝 TCP、目的 port 443、非 `INNER`、且有 `WildcardTarget` 的連線；不涵蓋 UDP／QUIC、其他 port 或所有 HTTPS 應用層請求。它使用 tracker 累計流量差分，沒有解析 HTTP。
+**納入範圍**
+
+監測適用於目的埠 443、有 `WildcardTarget` 的 TCP 連線，以及 `googlevideo.com` 及其子網域的 UDP 連線。兩者都從既有 tracker 取流量差分，排除 `INNER` 連線。
 
 **目前參數與判定：**
 
@@ -78,16 +82,19 @@ HTTP 政策判定同時用於 `checkNodeQuality` 與 `checkHostStatus` 的恢復
 | 確認視窗 | 2 分鐘 |
 | 確認後冷卻 | 5 分鐘 |
 
-每個觀測區段最多發出一次訊號；達到低吞吐檢查門檻但速率健康時，結束該區段的觀測。
+一般 TCP 在一個觀測區段內最多發出一次訊號。區段達到檢查門檻且速率健康時，結束該區段。
 
-**自動處置的必要條件：** 同一 Smart 實例內，相同 `proxyName + WildcardTarget` 在 2 分鐘內有第二條不同連線也發出持續低吞吐訊號，且第一條被觀察的連線已關閉。以下情況不能確認：同一連線重複觀測、前一條連線仍開啟、僅零回應、證據超時，或已在冷卻期內。
+一般 TCP 在同一 Smart 實例內需要 2 分鐘內兩條不同連線對同一節點及 wildcard 發出低吞吐訊號，且第一條已關閉。零回應只輸出警告。
 
-**確認後的目前行為：**
+YouTube CDN 的 TCP 和 UDP 連線只要連續採樣至少 2.5 秒、每一段都有回流但速率低於 16 KiB/s，且累計上傳至少 128 bytes、下載至少 16 KiB，即可在同一條連線確認劣化。暫停下載、完全無回包或恢復正常速率都會結束該觀測區段。手動固定節點時略過影片劣化處置。
 
-1. 為 node＋wildcard 記錄冷卻；不同 node 或不同 wildcard 不共享此冷卻。
-2. 清除確認連線的 target 級 unwrap cache。呼叫傳入空 ASN，不清除 ASN 級 cache。
-3. 找到該連線 tracker，設定 `SmartBlock="degraded"` 後關閉它。此標記讓既有品質檢查避免將強制關閉再當作新劣化。
-4. `filterProxies` 的排名、補足及既有兜底遍歷都排除冷卻中的 node＋wildcard。若因此沒有候選，由選路入口返回明確錯誤。
+**確認後的行為**
+
+1. 冷卻以節點、wildcard 和傳輸協定為單位，期限為 5 分鐘。
+2. 一般 TCP 清除 target 級 unwrap cache。影片 CDN 的 winner 快取和選舉按協定隔離，停用 ASN 共用。確認劣化時清除該協定的 winner，並阻止冷卻節點寫回。
+3. 只關閉被確認劣化的 tracker。tracker 以原子旗標保留關閉原因，Smart 關閉統計可辨識這是核心主動關閉。
+4. `filterProxies` 排除冷卻中的候選，影片 UDP 只使用支援 UDP 的節點。候選用盡時由選路入口返回錯誤。
+5. Smart 群組的 `videoDegradations` 會列出節點、協定、最近確認時間和冷卻到期時間。localClash 的增強篩選可在每輪開始時讀取這些資料，略過仍在冷卻或自上一輪取樣後確認劣化的出口。
 
 **必須保留的效能／生命週期邊界：** 不攔截每次 Read／Write 重新計量；從既有 tracker 取樣。`ReaderReplaceable`／`WriterReplaceable`／`Upstream` 允許 relay 解包，避免破壞底層傳輸快路徑。monitor 等待 tunnel Running，隨 Smart context 取消而結束；Close 將連線移出監測集合。
 
@@ -96,11 +103,13 @@ HTTP 政策判定同時用於 `checkNodeQuality` 與 `checkHostStatus` 的恢復
 - tracker 以 SmartTarget 索引加上 metadata 指標相等來定位；上游若複製 metadata、改變 wrapper／tracker 建立順序或計量位置，需要重新適配。
 - 冷卻及證據位於 Smart 實例記憶體中，沒有跨實例／重啟持久化。
 - 低吞吐是流量與時間的啟發式證據，不能證明節點是慢速的唯一根因；例如應用本身也可能刻意限速。
-- 手動選定節點的路徑會提前返回，跳過 `filterProxies` 的冷卻排除；monitor 包裝本身沒有排除手動模式。不能宣稱冷卻對手動選路也有相同效果。
+- 手動選定節點的路徑會提前返回，跳過 `filterProxies` 的冷卻排除。一般 TCP 的監測沿用原有適用範圍。
 - cache 已清除後才再定位 tracker；找不到 tracker 或 Close 失敗時會記錄警告，冷卻不會自動回滾。
 - monitor 直接關閉的是確認連線；SC-01 所述原有 force-close 路徑仍存在，不能把整個 Smart 的關閉範圍描述成只限此連線。
 
-**驗證：** [monitor tests](../../adapter/outboundgroup/smart_active_monitor_test.go) 覆蓋 relay unwrap、微量上傳不觸發、健康／低吞吐區分、同連線不能重複確認、零回應不確認、冷卻範圍與到期。現有「證據過期」用例使用同一連線與零回應原因，即使移除視窗限制也可能通過；有效低吞吐證據跨視窗失效，仍缺針對性驗證。其他缺口包括完整 tracker 搜尋／關閉、cache 刪除、所有候選遍歷和手動模式的整合效果；不能由這些單元測試推導實際 Safari 頁面已改善。
+**驗證**
+
+[monitor tests](../../adapter/outboundgroup/smart_active_monitor_test.go) 涵蓋 relay 解包、一般 TCP 的確認視窗、影片間歇下載、UDP tracker 關閉、冷卻節點無法寫回快取，以及下一條 UDP 連線重選與 TCP winner 保留。實際 YouTube 播放緩衝和長時間使用仍待路由器驗證。
 
 ## SC-05 分階段診斷
 

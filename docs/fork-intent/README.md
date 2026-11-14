@@ -24,7 +24,7 @@
 | SC-01 | 成功建立新連線不淘汰既有連線 | 已實作；尚缺撥號到 tracker 的端到端回歸測試 | [Smart 連線行為](smart-connections.md#sc-01-成功撥號不淘汰既有連線) |
 | SC-02 | 相同 target 的並發選路共用一次選舉 | 已實作；協調器單元測試已通過 | [Smart 連線行為](smart-connections.md#sc-02-相同-target-共用選舉結果) |
 | SC-03 | 區分節點故障、競速取消與 HTTP 端點政策 | 已實作；分類 helper 測試已通過 | [Smart 連線行為](smart-connections.md#sc-03-避免把取消與端點政策當成節點故障) |
-| SC-04 | 以保守的多連線證據處理持續劣化 | 已實作；訊號／證據／冷卻單元測試已通過，仍有整合驗證缺口 | [Smart 連線行為](smart-connections.md#sc-04-持續劣化監測) |
+| SC-04 | 以持續有回流的低吞吐證據重選 YouTube CDN 出口 | 涵蓋 TCP 與 UDP，Smart 可提供冷卻訊號給增強篩選。已驗證 UDP tracker 關閉及重選，路由器實播待驗 | [Smart 連線行為](smart-connections.md#sc-04-持續劣化監測) |
 | SC-05 | 用同一 trace 區分建連、首次寫讀與關閉 | 已實作；事件時間 helper 測試已通過 | [Smart 連線行為](smart-connections.md#sc-05-分階段診斷) |
 | SC-06 | TCP DoH 遇到 TLS 或回應靜默時，在同一筆查詢內試用同組 Smart 備援 | 已實作，macOS 50 候選離線回驗通過 | [Smart 連線行為](smart-connections.md#sc-06-tcp-doh-查詢內切換備援) |
 | SC-07 | LightGBM 啟動下載失敗時沿用舊模型，在下一個排程週期重試 | 已實作，本機 HTTP 回歸測試通過 | [Smart 連線行為](smart-connections.md#sc-07-lightgbm-啟動更新與排程重試) |

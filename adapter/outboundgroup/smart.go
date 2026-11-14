@@ -21,8 +21,8 @@ import (
 	"github.com/dlclark/regexp2"
 	"github.com/metacubex/mihomo/common/atomic"
 	"github.com/metacubex/mihomo/common/callback"
-	"github.com/metacubex/mihomo/common/xsync"
 	N "github.com/metacubex/mihomo/common/net"
+	"github.com/metacubex/mihomo/common/xsync"
 	"github.com/metacubex/mihomo/component/geodata"
 	"github.com/metacubex/mihomo/component/mmdb"
 	"github.com/metacubex/mihomo/component/profile/cachefile"
@@ -326,6 +326,10 @@ func (s *Smart) prepareDialSelection(ctx context.Context, metadata *C.Metadata) 
 	if err != nil {
 		return smartDialSelection{}, err
 	}
+	if metadata.WildcardTarget == smartVideoWildcard &&
+		s.activeNodeCoolingDown(winner, metadata.WildcardTarget, metadata.NetWork, time.Now()) {
+		return smartDialSelection{}, fmt.Errorf("smart selection winner %q is cooling down for %s", winner, metadata.WildcardTarget)
+	}
 	log.Debugln("[Smart] Selection follower uses published winner: group=[%s] target=[%s] node=[%s]", s.Name(), metadata.SmartTarget, winner)
 	return smartDialSelection{
 		proxies:       []C.Proxy{proxy},
@@ -397,7 +401,7 @@ func (s *Smart) DialContext(ctx context.Context, metadata *C.Metadata) (C.Conn, 
 				finalErr = err
 			} else {
 				if selection.persistWinner {
-					s.store.StoreUnwrapResult(s.Name(), s.configName, metadata.SmartTarget, asnNumber, metadata.WildcardTarget, []C.Proxy{p})
+					s.storeDialWinner(metadata, asnNumber, p)
 				}
 				s.onDialSuccess()
 				return s.WrapConnWithMetric(c, p, metadata, connectTime), p.Name(), nil
@@ -474,7 +478,7 @@ func (s *Smart) ListenPacketContext(ctx context.Context, metadata *C.Metadata) (
 			}
 
 			if selection.persistWinner {
-				s.store.StoreUnwrapResult(s.Name(), s.configName, metadata.SmartTarget, asnNumber, metadata.WildcardTarget, []C.Proxy{proxy})
+				s.storeDialWinner(metadata, asnNumber, proxy)
 			}
 			s.onDialSuccess()
 			winner = proxy.Name()
@@ -510,12 +514,16 @@ func (s *Smart) Unwrap(metadata *C.Metadata, touch bool) C.Proxy {
 	}
 
 	proxies, _ = s.selectProxies(metadata, proxies)
+	if len(proxies) == 0 {
+		return nil
+	}
 
 	return proxies[0]
 }
 
 func (s *Smart) IsL3Protocol(metadata *C.Metadata) bool {
-	return s.Unwrap(metadata, false).IsL3Protocol(metadata)
+	proxy := s.Unwrap(metadata, false)
+	return proxy != nil && proxy.IsL3Protocol(metadata)
 }
 
 func (s *Smart) SupportUDP() bool {
@@ -572,6 +580,7 @@ func (s *Smart) WrapPacketConnWithMetric(pc C.PacketConn, proxy C.Proxy, metadat
 	pc = callback.NewFirstReadCallBackPacketConn(pc, func(latency int64) {
 		udpLatency.Store(latency)
 	})
+	pc = s.monitorActivePacketConnection(pc, proxy, metadata)
 
 	return s.registerPacketClosureMetricsCallback(pc, proxy, metadata, connectTime, &udpLatency)
 }
@@ -642,6 +651,7 @@ func (s *Smart) MarshalJSON() ([]byte, error) {
 		"sampleRate":      s.sampleRate,
 		"preferASN":       s.preferASN,
 		"tolerance":       s.tolerance,
+		"videoDegradations": s.videoDegradations(time.Now(), proxies),
 	})
 }
 
@@ -657,7 +667,7 @@ func (s *Smart) filterProxies(metadata *C.Metadata, wildcardTarget string, names
 	blockedNodes := s.store.GetBlockedNodes(s.Name(), s.configName)
 	wtFailNodes, _, _, wtBlocked := s.store.GetHostStatus(s.Name(), s.configName, wildcardTarget, s.hostFailLimit, metadata.SmartTarget)
 	activeCooling := func(name string) bool {
-		return s.activeNodeCoolingDown(name, wildcardTarget, time.Now())
+		return s.activeNodeCoolingDown(name, wildcardTarget, metadata.NetWork, time.Now())
 	}
 
 	var proxyByName map[string]C.Proxy
@@ -827,7 +837,7 @@ func (s *Smart) filterProxies(metadata *C.Metadata, wildcardTarget string, names
 
 		if len(selected) == 0 {
 			for _, p := range fallbackAll {
-				if activeCooling(p.Name()) {
+				if activeCooling(p.Name()) || (isUDP && wildcardTarget == smartVideoWildcard && !p.SupportUDP()) {
 					continue
 				}
 				if p.AliveForTestUrl(s.testUrl) {
@@ -841,7 +851,7 @@ func (s *Smart) filterProxies(metadata *C.Metadata, wildcardTarget string, names
 
 		if len(selected) == 0 {
 			for _, p := range fallbackAll {
-				if activeCooling(p.Name()) {
+				if activeCooling(p.Name()) || (isUDP && wildcardTarget == smartVideoWildcard && !p.SupportUDP()) {
 					continue
 				}
 				selected = append(selected, p)
@@ -860,13 +870,15 @@ func (s *Smart) selectProxiesWithState(metadata *C.Metadata, proxies []C.Proxy, 
 	// attach ASN info
 	asnNumber := s.getASNCode(metadata)
 	wildcardTarget := smart.GetEffectiveTarget(metadata.Host, metadata.DstIP.String())
+	if metadata.DstPort == 443 && metadata.Type != C.INNER && smartVideoCDN(metadata.RuleHost()) {
+		wildcardTarget = smartVideoWildcard
+	}
 	metadata.WildcardTarget = wildcardTarget
 	if metadata.SmartTarget == "" {
 		metadata.SmartTarget = wildcardTarget
 	}
-	state := smartProxySelectionState{
-		key: smartSelectionFlightKey(s.configName, s.Name(), metadata.SmartTarget),
-	}
+	cacheTarget, cacheASN := smartWinnerCacheScope(metadata, asnNumber)
+	state := smartProxySelectionState{key: smartSelectionFlightKey(s.configName, s.Name(), cacheTarget)}
 
 	if selected := s.selected.Load(); selected != "" {
 		for _, p := range proxies {
@@ -891,7 +903,7 @@ func (s *Smart) selectProxiesWithState(metadata *C.Metadata, proxies []C.Proxy, 
 	trySelector := func(isUDP bool) ([]string, []float64) {
 		// check the unwrap cache
 		if !opts.fresh {
-			if proxiesName, expired := s.store.GetUnwrapResult(s.Name(), s.configName, metadata.SmartTarget, asnNumber, metadata.WildcardTarget); len(proxiesName) > 0 {
+			if proxiesName, expired := s.store.GetUnwrapResult(s.Name(), s.configName, cacheTarget, cacheASN, wildcardTarget); len(proxiesName) > 0 {
 				state.cacheHit = true
 				state.cacheExpired = expired
 				return proxiesName, nil
@@ -1762,11 +1774,17 @@ func (s *Smart) registerClosureMetricsCallback(c C.Conn, proxy C.Proxy, metadata
 				}
 			}
 
-			if closeErr != nil {
+			degraded := info.ClosedForDegradation()
+			if closeErr != nil && !degraded {
 				s.markNodeFailure(metadata, proxy.Name(), true, true, 3)
 			}
 
-			go s.recordConnectionStats(metadata, proxy, connectTime, latency, uploadTotal, downloadTotal, maxUploadRate, maxDownloadRate, connectionDuration, tcpStats, closeErr)
+			metadataForStats := metadata
+			if degraded {
+				metadataForStats = metadata.Clone()
+				metadataForStats.SmartBlock = "degraded"
+			}
+			go s.recordConnectionStats(metadataForStats, proxy, connectTime, latency, uploadTotal, downloadTotal, maxUploadRate, maxDownloadRate, connectionDuration, tcpStats, closeErr)
 			return
 		}
 	})
@@ -1783,7 +1801,12 @@ func (s *Smart) registerPacketClosureMetricsCallback(pc C.PacketConn, proxy C.Pr
 			maxUploadRate := info.MaxUploadRate.Load()
 			maxDownloadRate := info.MaxDownloadRate.Load()
 
-			go s.recordConnectionStats(metadata, proxy, connectTime, udpLatency.Load(),
+			metadataForStats := metadata
+			if info.ClosedForDegradation() {
+				metadataForStats = metadata.Clone()
+				metadataForStats.SmartBlock = "degraded"
+			}
+			go s.recordConnectionStats(metadataForStats, proxy, connectTime, udpLatency.Load(),
 				uploadTotal, downloadTotal, maxUploadRate, maxDownloadRate, connectionDuration, nil, nil)
 			return
 		}
@@ -1899,8 +1922,7 @@ func (s *Smart) closeSameConnection(metadata *C.Metadata, proxyName, target, asn
 			return true
 		}
 		if force {
-			tracker.Info().Metadata.SmartBlock = "degraded"
-			_ = tracker.Close()
+			_ = statistic.CloseDegraded(tracker)
 		} else if proxyName != "" {
 			if !lo.Contains(tracker.Chains(), proxyName) {
 				_ = tracker.Close()
