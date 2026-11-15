@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"sync"
+	"time"
 
 	"github.com/metacubex/mihomo/component/smart"
 	C "github.com/metacubex/mihomo/constant"
@@ -13,28 +14,36 @@ import (
 var errSmartSelectionMissingWinner = errors.New("smart selection completed without a winner")
 
 type smartSelectionOptions struct {
-	fresh        bool
-	strictHealth bool
+	fresh         bool
+	strictHealth  bool
+	cachedOnly    bool
+	checkPriority bool
+	reserveWinner string
+	dialID        uint64
 }
 
 type smartProxySelectionState struct {
 	key          string
-	cacheHit     bool
+	cacheTarget  string
+	cacheASN     string
+	cached       *smart.UnwrapResult
 	cacheExpired bool
+	reselect     string
 	fixed        bool
 }
 
 type smartDialSelection struct {
-	proxies       []C.Proxy
-	asnNumber     string
-	persistWinner bool
-	flightKey     string
-	flight        *smartSelectionFlight
-	leader        bool
+	proxies          []C.Proxy
+	asnNumber        string
+	cached           *smart.UnwrapResult
+	fixed            bool
+	eligiblePriority map[string]float64
+	flightKey        string
+	flight           *smartSelectionFlight
 }
 
 func shouldRecordSmartDialFailure(ctx context.Context, err error) bool {
-	return err != nil && !errors.Is(err, context.Canceled) && ctx.Err() == nil
+	return smartDialOutcome(ctx, err) == "failed"
 }
 
 func smartStatusProbeAccepted(status uint16, ok bool) bool {
@@ -63,40 +72,6 @@ func smartSelectionFlightKey(config, group, cacheTarget string) string {
 	// The election uses the same target key as the winner cache even when
 	// parallel connections resolve different ASN metadata.
 	return smart.FormatDBKey(config, group, cacheTarget)
-}
-
-func smartDialBatchBounds(total, iteration int, leader bool) (int, int) {
-	if total <= 0 || iteration < 0 {
-		return 0, 0
-	}
-	if total == 1 {
-		if iteration == 0 {
-			return 0, 1
-		}
-		return 0, 0
-	}
-	if leader {
-		// There is exactly one leader per target, so racing the complete bounded
-		// candidate set avoids making every follower inherit a slow first-node
-		// timeout while still publishing only one successful winner.
-		if iteration == 0 {
-			return 0, total
-		}
-		return 0, 0
-	}
-	if iteration == 0 {
-		return 0, 1
-	}
-
-	begin := 1 + (iteration-1)*parallelDials
-	if begin >= total {
-		return 0, 0
-	}
-	end := begin + parallelDials
-	if end > total {
-		end = total
-	}
-	return begin, end
 }
 
 func (c *smartSelectionCoordinator) begin(key string) (*smartSelectionFlight, bool) {
@@ -155,4 +130,71 @@ func findSmartProxyByName(proxies []C.Proxy, name string) (C.Proxy, error) {
 		}
 	}
 	return nil, fmt.Errorf("smart selection winner unavailable: %s", name)
+}
+
+// priorityRecheck is evaluated only when a TCP request would reuse a winner.
+// Eligibility changes can prompt a new election before the periodic recheck.
+func (s *Smart) priorityRecheck(now time.Time, cached *smart.UnwrapResult, proxies []C.Proxy, eligibility smartProxyEligibility) string {
+	factor := s.getPriorityFactor(cached.Proxy)
+	due := !now.Before(cached.SelectedAt.Add(s.priorityRecheckInterval))
+	for _, p := range proxies {
+		if s.getPriorityFactor(p.Name()) <= factor || eligibility.exclusion(p) != "" {
+			continue
+		}
+		if _, wasEligible := cached.EligibleHigher[p.Name()]; !wasEligible {
+			return "higher-priority-recovered"
+		}
+		if due {
+			return "priority-recheck-due"
+		}
+		// Existing URL-test history also exposes an outage and recovery that
+		// occurred entirely between incoming connections.
+		for _, sample := range p.DelayHistoryForTestUrl(s.testUrl) {
+			if sample.Delay == 0 && sample.Time.After(cached.SelectedAt) {
+				return "higher-priority-recovered"
+			}
+		}
+	}
+	return ""
+}
+
+// Keep a healthy representative of each available tier and, when eligible,
+// the current winner. Use the remaining slots for the existing ranking.
+func (s *Smart) limitPriorityCandidates(ranked []C.Proxy, limit int, winner string) []C.Proxy {
+	if len(ranked) <= limit {
+		return ranked
+	}
+	chosen := make(map[string]bool, limit)
+	tiers := make(map[float64]bool)
+	for _, p := range ranked {
+		if p.Name() == winner {
+			chosen[winner] = true
+			tiers[s.getPriorityFactor(winner)] = true
+			break
+		}
+	}
+	for _, p := range ranked {
+		if len(chosen) == limit {
+			break
+		}
+		factor := s.getPriorityFactor(p.Name())
+		if !tiers[factor] {
+			chosen[p.Name()] = true
+			tiers[factor] = true
+		}
+	}
+	for _, p := range ranked {
+		if len(chosen) == limit {
+			break
+		}
+		chosen[p.Name()] = true
+	}
+	selected := make([]C.Proxy, 0, limit)
+	for _, p := range ranked {
+		if chosen[p.Name()] {
+			selected = append(selected, p)
+			delete(chosen, p.Name())
+		}
+	}
+	return selected
 }

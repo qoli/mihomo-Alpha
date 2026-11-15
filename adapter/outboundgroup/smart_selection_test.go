@@ -3,10 +3,14 @@ package outboundgroup
 import (
 	"context"
 	"errors"
+	"fmt"
 	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"github.com/metacubex/mihomo/component/smart"
+	C "github.com/metacubex/mihomo/constant"
 )
 
 func TestSmartSelectionFlightKeyMatchesTargetCacheIdentity(t *testing.T) {
@@ -23,33 +27,98 @@ func TestSmartSelectionFlightKeyMatchesTargetCacheIdentity(t *testing.T) {
 	}
 }
 
-func TestSmartDialBatchBoundsLeaderRacesAllCandidatesOnce(t *testing.T) {
-	begin, end := smartDialBatchBounds(10, 0, true)
-	if begin != 0 || end != 10 {
-		t.Fatalf("leader first batch = [%d:%d], want [0:10]", begin, end)
+type smartPriorityTestProxy struct {
+	smartVideoTestProxy
+	alive   bool
+	history []C.DelayHistory
+}
+
+func (p smartPriorityTestProxy) AliveForTestUrl(string) bool { return p.alive }
+func (p smartPriorityTestProxy) DelayHistoryForTestUrl(string) []C.DelayHistory {
+	return p.history
+}
+
+func TestSmartPriorityElectionReservesRoomForOtherTiers(t *testing.T) {
+	smart.InitCache()
+	s := &Smart{GroupBase: NewGroupBase(GroupBaseOption{Name: t.Name(), Type: C.Smart}), store: &smart.Store{}}
+	applyPolicyPriority(s, "US:5;JP:4")
+	metadata := &C.Metadata{NetWork: C.TCP, SmartTarget: "stream", WildcardTarget: "*.example.com"}
+	var all []C.Proxy
+	for i := 0; i < maxSelected+3; i++ {
+		all = append(all, smartVideoTestProxy{name: fmt.Sprintf("US%d", i)})
 	}
-	begin, end = smartDialBatchBounds(10, 1, true)
-	if begin != 0 || end != 0 {
-		t.Fatalf("leader second batch = [%d:%d], want empty", begin, end)
+	// A group can include the same name through multiple providers.
+	all = append(all, all[0], all[0])
+	all = append(all, smartVideoTestProxy{name: "JP"}, smartVideoTestProxy{name: "NL"})
+	selected := s.filterProxies(metadata, nil, nil, all, maxSelected, smartSelectionOptions{checkPriority: true, reserveWinner: "NL"})
+	if len(selected) != maxSelected {
+		t.Fatalf("selected %d candidates, want %d", len(selected), maxSelected)
+	}
+	seen := make(map[string]bool)
+	for _, proxy := range selected {
+		if seen[proxy.Name()] {
+			t.Fatalf("selected two candidates named %s", proxy.Name())
+		}
+		seen[proxy.Name()] = true
+	}
+	if s.getPriorityFactor(selected[0].Name()) != 5 {
+		t.Fatalf("expected a US candidate first, got %s", selected[0].Name())
+	}
+	for _, name := range []string{"JP", "NL"} {
+		if !seen[name] {
+			t.Fatalf("missing ranked or reserved candidate %s", name)
+		}
 	}
 }
 
-func TestSmartDialBatchBoundsCachedPathKeepsBoundedRetries(t *testing.T) {
-	tests := []struct {
-		iteration int
-		begin     int
-		end       int
-	}{
-		{iteration: 0, begin: 0, end: 1},
-		{iteration: 1, begin: 1, end: 6},
-		{iteration: 2, begin: 6, end: 10},
+func TestSmartFixedSelectionBypassesPriorityElection(t *testing.T) {
+	s := &Smart{GroupBase: NewGroupBase(GroupBaseOption{Name: t.Name(), Type: C.Smart})}
+	applyPolicyPriority(s, "US:5")
+	s.providerProxies = []C.Proxy{smartVideoTestProxy{name: "US"}, smartVideoTestProxy{name: "NL"}}
+	s.ForceSet("NL")
+	selection, err := s.prepareDialSelection(context.Background(), &C.Metadata{NetWork: C.TCP, SmartTarget: "stream"})
+	if err != nil || len(selection.proxies) != 1 || selection.proxies[0].Name() != "NL" || selection.flight != nil {
+		t.Fatalf("fixed selection entered automatic priority election: %+v, %v", selection, err)
 	}
-	for _, test := range tests {
-		begin, end := smartDialBatchBounds(10, test.iteration, false)
-		if begin != test.begin || end != test.end {
-			t.Fatalf("iteration %d batch = [%d:%d], want [%d:%d]", test.iteration, begin, end, test.begin, test.end)
+}
+
+func TestSmartPriorityRecheckUsesElectionTimeAndRecovery(t *testing.T) {
+	now := time.Now()
+	s := &Smart{priorityRecheckInterval: time.Minute}
+	applyPolicyPriority(s, "US:5;JP:4")
+	entry := &smart.UnwrapResult{
+		Proxy: "NL", SelectedAt: now, EligibleHigher: map[string]struct{}{"US": {}},
+	}
+	eligibility := smartProxyEligibility{smart: s, metadata: &C.Metadata{NetWork: C.TCP}, now: now}
+	us := smartPriorityTestProxy{smartVideoTestProxy: smartVideoTestProxy{name: "US"}, alive: true}
+	jp := smartPriorityTestProxy{smartVideoTestProxy: smartVideoTestProxy{name: "JP"}, alive: true}
+
+	t.Run("healthy at election", func(t *testing.T) {
+		if reason := s.priorityRecheck(now, entry, []C.Proxy{us}, eligibility); reason != "" {
+			t.Fatalf("stable winner immediately re-elected: %s", reason)
 		}
-	}
+		if reason := s.priorityRecheck(now.Add(time.Minute), entry, []C.Proxy{us}, eligibility); reason != "priority-recheck-due" {
+			t.Fatalf("expected periodic recheck, got %q", reason)
+		}
+	})
+	t.Run("newly eligible", func(t *testing.T) {
+		if reason := s.priorityRecheck(now, entry, []C.Proxy{us, jp}, eligibility); reason != "higher-priority-recovered" {
+			t.Fatalf("expected early recheck, got %q", reason)
+		}
+	})
+	t.Run("outage between requests", func(t *testing.T) {
+		us.history = []C.DelayHistory{{Time: now.Add(time.Second)}, {Time: now.Add(2 * time.Second), Delay: 18}}
+		if reason := s.priorityRecheck(now.Add(3*time.Second), entry, []C.Proxy{us}, eligibility); reason != "higher-priority-recovered" {
+			t.Fatalf("expected recheck after outage, got %q", reason)
+		}
+	})
+	t.Run("no healthy higher priority", func(t *testing.T) {
+		us.alive = false
+		eligibility.hostFailures = map[string]int{"JP": 1}
+		if reason := s.priorityRecheck(now.Add(time.Minute), entry, []C.Proxy{us, jp}, eligibility); reason != "" {
+			t.Fatalf("unhealthy candidates prompted recheck: %s", reason)
+		}
+	})
 }
 
 func TestShouldRecordSmartDialFailureIgnoresCanceledRaceLoser(t *testing.T) {

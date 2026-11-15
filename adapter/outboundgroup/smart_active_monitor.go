@@ -18,7 +18,6 @@ import (
 
 const (
 	smartMonitorInterval           = time.Second
-	smartMonitorEvidenceWindow     = 2 * time.Minute
 	smartMonitorCooldown           = 5 * time.Minute
 	smartMonitorNoResponseAfter    = 5 * time.Second
 	smartMonitorSlowResponseAfter  = 2500 * time.Millisecond
@@ -35,7 +34,6 @@ type smartActiveMonitor struct {
 }
 
 type smartDegradationEvidence struct {
-	connection     *smartMonitoredTraffic
 	observedAt     time.Time
 	confirmedUntil time.Time
 }
@@ -125,6 +123,11 @@ func (s *Smart) monitorActivePacketConnection(conn C.PacketConn, proxy C.Proxy, 
 
 const smartVideoWildcard = "*.googlevideo.com"
 
+func smartOrdinaryTLS(metadata *C.Metadata) bool {
+	return metadata.NetWork == C.TCP && metadata.DstPort == 443 && metadata.Type != C.INNER &&
+		metadata.WildcardTarget != smartVideoWildcard
+}
+
 func smartVideoCDN(host string) bool {
 	host = strings.ToLower(strings.TrimSuffix(host, "."))
 	return host == "googlevideo.com" || strings.HasSuffix(host, ".googlevideo.com")
@@ -137,7 +140,7 @@ func smartWinnerCacheScope(metadata *C.Metadata, asnNumber string) (string, stri
 	return metadata.SmartTarget, asnNumber
 }
 
-func (s *Smart) storeDialWinner(metadata *C.Metadata, asnNumber string, proxy C.Proxy) {
+func (s *Smart) storeDialWinner(metadata *C.Metadata, asnNumber string, proxy C.Proxy, eligibleHigher map[string]struct{}) {
 	target, cacheASN := smartWinnerCacheScope(metadata, asnNumber)
 	if metadata.WildcardTarget == smartVideoWildcard {
 		s.activeMonitor.mu.Lock()
@@ -147,7 +150,9 @@ func (s *Smart) storeDialWinner(metadata *C.Metadata, asnNumber string, proxy C.
 			return
 		}
 	}
-	s.store.StoreUnwrapResult(s.Name(), s.configName, target, cacheASN, metadata.WildcardTarget, []C.Proxy{proxy})
+	s.store.StoreUnwrapResult(s.Name(), s.configName, target, cacheASN, smart.UnwrapResult{
+		Proxy: proxy.Name(), SelectedAt: time.Now(), EligibleHigher: eligibleHigher,
+	})
 }
 
 func (s *Smart) trackActiveTraffic(proxy C.Proxy, metadata *C.Metadata) *smartMonitoredTraffic {
@@ -307,14 +312,6 @@ func (s *Smart) removeActiveConnection(conn *smartMonitoredTraffic) {
 
 func (s *Smart) sampleActiveConnections(now time.Time) {
 	s.activeMonitor.mu.Lock()
-	for key, evidence := range s.activeMonitor.evidence {
-		if key.wildcard == smartVideoWildcard && !evidence.confirmedUntil.IsZero() {
-			continue
-		}
-		if !now.Before(evidence.confirmedUntil) && now.Sub(evidence.observedAt) > smartMonitorEvidenceWindow {
-			delete(s.activeMonitor.evidence, key)
-		}
-	}
 	connections := make([]*smartMonitoredTraffic, 0, len(s.activeMonitor.connections))
 	for conn := range s.activeMonitor.connections {
 		connections = append(connections, conn)
@@ -343,6 +340,12 @@ func (s *Smart) handleActiveDegradation(conn *smartMonitoredTraffic, signal smar
 			s.Name(), conn.proxyName, conn.wildcardTarget, signal.duration, signal.uploadBytes, signal.observation)
 		return
 	}
+	if !conn.videoCDN {
+		// An encrypted interactive stream can legitimately send very little.
+		log.Debugln("[SmartMonitor] Observed low throughput: group=[%s] node=[%s] wildcard=[%s] duration=[%s] upload=[%d] download=[%d] observation=[%d]",
+			s.Name(), conn.proxyName, conn.wildcardTarget, signal.duration, signal.uploadBytes, signal.downloadBytes, signal.observation)
+		return
+	}
 	key := smartDegradationKey{node: conn.proxyName, wildcard: conn.wildcardTarget, network: conn.metadata.NetWork}
 	confirmed := s.recordActiveDegradationEvidence(key, conn, signal.reason, now)
 	if !confirmed {
@@ -353,10 +356,6 @@ func (s *Smart) handleActiveDegradation(conn *smartMonitoredTraffic, signal smar
 
 	log.Warnln("[SmartMonitor] Confirmed active degradation: group=[%s] node=[%s] wildcard=[%s] reason=[%s] duration=[%s] upload=[%d] download=[%d] observation=[%d] network=[%s]",
 		s.Name(), conn.proxyName, conn.wildcardTarget, signal.reason, signal.duration, signal.uploadBytes, signal.downloadBytes, signal.observation, key.network.String())
-
-	if !conn.videoCDN {
-		s.store.DeleteUnwrapResult(s.Name(), s.configName, conn.target, "", conn.wildcardTarget)
-	}
 
 	tracker := s.findActiveTracker(conn)
 	if tracker == nil {
@@ -373,7 +372,7 @@ func (s *Smart) handleActiveDegradation(conn *smartMonitoredTraffic, signal smar
 }
 
 func (s *Smart) recordActiveDegradationEvidence(key smartDegradationKey, conn *smartMonitoredTraffic, reason string, now time.Time) bool {
-	if reason != "sustained-low-throughput" {
+	if !conn.videoCDN || reason != "sustained-low-throughput" {
 		return false
 	}
 	s.activeMonitor.mu.Lock()
@@ -381,35 +380,13 @@ func (s *Smart) recordActiveDegradationEvidence(key smartDegradationKey, conn *s
 	if s.activeMonitor.evidence == nil {
 		s.activeMonitor.evidence = make(map[smartDegradationKey]smartDegradationEvidence)
 	}
-	previous, found := s.activeMonitor.evidence[key]
-	if found && now.Before(previous.confirmedUntil) {
+	if now.Before(s.activeMonitor.evidence[key].confirmedUntil) {
 		return false
 	}
-	withinWindow := found && now.Sub(previous.observedAt) <= smartMonitorEvidenceWindow
-	if withinWindow && !conn.videoCDN {
-		if previous.connection == conn || !previous.connection.isClosed() {
-			return false
-		}
-	}
-	if conn.videoCDN || withinWindow {
-		s.activeMonitor.evidence[key] = smartDegradationEvidence{observedAt: now, confirmedUntil: now.Add(smartMonitorCooldown)}
-		if conn.videoCDN {
-			cacheTarget, _ := smartWinnerCacheScope(conn.metadata, "")
-			s.store.DeleteUnwrapResult(s.Name(), s.configName, cacheTarget, "", key.wildcard)
-		}
-		return true
-	}
-	s.activeMonitor.evidence[key] = smartDegradationEvidence{
-		connection: conn,
-		observedAt: now,
-	}
-	return false
-}
-
-func (c *smartMonitoredTraffic) isClosed() bool {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	return c.closed
+	s.activeMonitor.evidence[key] = smartDegradationEvidence{observedAt: now, confirmedUntil: now.Add(smartMonitorCooldown)}
+	cacheTarget, _ := smartWinnerCacheScope(conn.metadata, "")
+	s.store.DeleteUnwrapResult(s.Name(), s.configName, cacheTarget, "", nil)
+	return true
 }
 
 type smartDegradationKey struct {

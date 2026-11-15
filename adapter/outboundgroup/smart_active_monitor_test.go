@@ -72,38 +72,66 @@ func TestSmartMonitoredConnDistinguishesSlowAndHealthyTransfer(t *testing.T) {
 	}
 }
 
-func TestSmartActiveDegradationRejectsRepeatedEvidenceFromSameConnection(t *testing.T) {
-	s := &Smart{}
-	conn := &smartMonitoredTraffic{}
-	now := time.Unix(300, 0)
-	key := smartDegradationKey{node: "node", wildcard: "*.example.com", network: C.TCP}
+func TestSmartOrdinaryTLSLowThroughputKeepsTrackerAndWinner(t *testing.T) {
+	smart.InitCache()
+	s := &Smart{GroupBase: NewGroupBase(GroupBaseOption{Name: t.Name(), Type: C.Smart}), store: &smart.Store{}}
+	proxy := smartVideoTestProxy{name: "working"}
+	metadata := C.Metadata{NetWork: C.TCP, Type: C.TUN, DstPort: 443, WildcardTarget: "*.example.com", SmartTarget: "stream"}
+	s.storeDialWinner(&metadata, "", proxy, nil)
 
-	if s.recordActiveDegradationEvidence(key, conn, "sustained-low-throughput", now) {
-		t.Fatal("first observation confirmed degradation")
+	observe := func() statistic.Tracker {
+		target := metadata
+		local, remote := net.Pipe()
+		t.Cleanup(func() { _ = remote.Close() })
+		conn := s.monitorActiveConnection(&smartMonitorTestConn{ExtendedConn: N.NewExtendedConn(local)}, proxy, &target)
+		tracker := statistic.NewTCPTracker(conn, statistic.DefaultManager, &target, nil, 0, 0, true)
+		t.Cleanup(func() { _ = tracker.Close() })
+		monitored := conn.(*smartMonitoredConn).smartMonitoredTraffic
+		s.handleActiveDegradation(monitored, smartMonitorSignal{reason: "sustained-low-throughput"}, time.Now())
+		return tracker
 	}
-	if s.recordActiveDegradationEvidence(key, conn, "sustained-low-throughput", now.Add(time.Second)) {
-		t.Fatal("duplicate observation confirmed degradation")
+
+	initial := observe()
+	_ = initial.Close()
+	active := observe()
+	if statistic.DefaultManager.Get(active.ID()) == nil || active.Info().ClosedForDegradation() {
+		t.Fatal("low-volume interactive connection was closed")
 	}
-	if s.recordActiveDegradationEvidence(key, conn, "sustained-low-throughput", now.Add(2*time.Second)) {
-		t.Fatal("same connection confirmed degradation")
+	if result, _ := s.store.GetUnwrapResult(s.Name(), s.configName, metadata.SmartTarget, ""); result == nil || result.Proxy != proxy.Name() {
+		t.Fatalf("observation changed the winner: %v", result)
 	}
-	conn.closed = true
-	if !s.recordActiveDegradationEvidence(key, &smartMonitoredTraffic{}, "sustained-low-throughput", now.Add(3*time.Second)) {
-		t.Fatal("closed prior connection and distinct new connection did not confirm degradation")
+	if s.activeNodeCoolingDown(proxy.Name(), metadata.WildcardTarget, metadata.NetWork, time.Now()) {
+		t.Fatal("low-volume interactive connection put its exit in cooldown")
 	}
 }
 
-func TestSmartActiveDegradationEvidenceExpires(t *testing.T) {
-	s := &Smart{}
-	conn := &smartMonitoredTraffic{closed: true}
-	now := time.Unix(400, 0)
-	key := smartDegradationKey{node: "node", wildcard: "*.example.com", network: C.TCP}
-
-	if s.recordActiveDegradationEvidence(key, conn, "sustained-low-throughput", now) {
-		t.Fatal("first observation confirmed degradation")
+func TestSmartSustainedVideoTCPStillClosesDegradedTracker(t *testing.T) {
+	smart.InitCache()
+	s := &Smart{GroupBase: NewGroupBase(GroupBaseOption{Name: t.Name(), Type: C.Smart}), store: &smart.Store{}}
+	proxy := smartVideoTestProxy{name: "slow-video"}
+	metadata := &C.Metadata{NetWork: C.TCP, Type: C.TUN, DstPort: 443, SmartTarget: "video", WildcardTarget: smartVideoWildcard}
+	s.storeDialWinner(metadata, "", proxy, nil)
+	local, remote := net.Pipe()
+	t.Cleanup(func() { _ = remote.Close() })
+	conn := s.monitorActiveConnection(&smartMonitorTestConn{ExtendedConn: N.NewExtendedConn(local)}, proxy, metadata)
+	tracker := statistic.NewTCPTracker(conn, statistic.DefaultManager, metadata, nil, 0, 0, true)
+	t.Cleanup(func() { _ = tracker.Close() })
+	start := time.Now()
+	s.sampleActiveConnections(start)
+	for second := 1; second <= 3; second++ {
+		tracker.UploadTotal.Add(256)
+		tracker.DownloadTotal.Add(8 * 1024)
+		s.sampleActiveConnections(start.Add(time.Duration(second) * time.Second))
 	}
-	if s.recordActiveDegradationEvidence(key, &smartMonitoredTraffic{}, "sustained-low-throughput", now.Add(smartMonitorEvidenceWindow+time.Second)) {
-		t.Fatal("expired evidence confirmed degradation")
+	if statistic.DefaultManager.Get(tracker.ID()) != nil || !tracker.Info().ClosedForDegradation() {
+		t.Fatal("continuous low-rate video did not close its tracker")
+	}
+	target, _ := smartWinnerCacheScope(metadata, "")
+	if result, _ := s.store.GetUnwrapResult(s.Name(), s.configName, target, ""); result != nil {
+		t.Fatalf("confirmed video degradation kept its winner: %v", result)
+	}
+	if !s.activeNodeCoolingDown(proxy.Name(), smartVideoWildcard, C.TCP, start.Add(3*time.Second)) {
+		t.Fatal("confirmed video degradation did not enter TCP cooldown")
 	}
 }
 
@@ -188,10 +216,10 @@ func TestSmartSustainedVideoUDPReselectsAndPublishesEvidence(t *testing.T) {
 	if metadata.WildcardTarget != smartVideoWildcard {
 		t.Fatalf("sniffed CDN host selected %q", metadata.WildcardTarget)
 	}
-	s.storeDialWinner(metadata, "12345", stalled)
+	s.storeDialWinner(metadata, "12345", stalled, nil)
 	tcp := *metadata
 	tcp.NetWork = C.TCP
-	s.storeDialWinner(&tcp, "12345", working)
+	s.storeDialWinner(&tcp, "12345", working, nil)
 	pc := &smartMonitorTestPacketConn{}
 	tracker := statistic.NewUDPTracker(s.monitorActivePacketConnection(pc, stalled, metadata), statistic.DefaultManager, metadata, nil, 0, 0, true)
 	t.Cleanup(func() { _ = tracker.Close() })
@@ -212,8 +240,8 @@ func TestSmartSustainedVideoUDPReselectsAndPublishesEvidence(t *testing.T) {
 		t.Fatal("sustained low throughput did not close the tracked video flow")
 	}
 	cacheTarget, _ := smartWinnerCacheScope(metadata, "12345")
-	s.storeDialWinner(metadata, "12345", stalled)
-	if got, _ := s.store.GetUnwrapResult(s.Name(), s.configName, cacheTarget, "", smartVideoWildcard); len(got) != 0 {
+	s.storeDialWinner(metadata, "12345", stalled, nil)
+	if got, _ := s.store.GetUnwrapResult(s.Name(), s.configName, cacheTarget, ""); got != nil {
 		t.Fatalf("cooling UDP winner repopulated the cache: %v", got)
 	}
 	nextMetadata := *metadata
@@ -223,11 +251,11 @@ func TestSmartSustainedVideoUDPReselectsAndPublishesEvidence(t *testing.T) {
 		t.Fatalf("new video UDP association: %v", err)
 	}
 	t.Cleanup(func() { _ = next.Close() })
-	if got, _ := s.store.GetUnwrapResult(s.Name(), s.configName, cacheTarget, "", smartVideoWildcard); len(got) != 1 || got[0] != working.name {
+	if got, _ := s.store.GetUnwrapResult(s.Name(), s.configName, cacheTarget, ""); got == nil || got.Proxy != working.name {
 		t.Fatalf("video UDP did not reselect a capable exit: %v", got)
 	}
 	selection, err := s.prepareDialSelection(context.Background(), &tcp)
-	if err != nil || len(selection.proxies) != 1 || selection.proxies[0].Name() != working.name || selection.leader {
+	if err != nil || len(selection.proxies) != 1 || selection.proxies[0].Name() != working.name || selection.flight != nil {
 		t.Fatalf("UDP cooldown changed the TCP winner: %v, %v", selection.proxies, err)
 	}
 	data, err := s.MarshalJSON()

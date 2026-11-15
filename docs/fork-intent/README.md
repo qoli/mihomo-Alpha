@@ -21,11 +21,11 @@
 
 | ID | 意圖 | 狀態 | 維護文件 |
 | --- | --- | --- | --- |
-| SC-01 | 成功建立新連線不淘汰既有連線 | 已實作；尚缺撥號到 tracker 的端到端回歸測試 | [Smart 連線行為](smart-connections.md#sc-01-成功撥號不淘汰既有連線) |
-| SC-02 | 相同 target 的並發選路共用一次選舉 | 已實作；協調器單元測試已通過 | [Smart 連線行為](smart-connections.md#sc-02-相同-target-共用選舉結果) |
-| SC-03 | 區分節點故障、競速取消與 HTTP 端點政策 | 已實作；分類 helper 測試已通過 | [Smart 連線行為](smart-connections.md#sc-03-避免把取消與端點政策當成節點故障) |
-| SC-04 | 以持續有回流的低吞吐證據重選 YouTube CDN 出口 | 涵蓋 TCP 與 UDP，Smart 可提供冷卻訊號給增強篩選。已驗證 UDP tracker 關閉及重選，路由器實播待驗 | [Smart 連線行為](smart-connections.md#sc-04-持續劣化監測) |
-| SC-05 | 用同一 trace 區分建連、首次寫讀與關閉 | 已實作；事件時間 helper 測試已通過 | [Smart 連線行為](smart-connections.md#sc-05-分階段診斷) |
+| SC-01 | 成功建立新連線時保留既有連線 | 已實作。一般 TLS 的品質失敗只影響後續選線 | [Smart 連線行為](smart-connections.md#sc-01-成功撥號不淘汰既有連線) |
+| SC-02 | 相同 target 共用選舉，較高倍率的合格出口能重新參與 | 已實作。勝者的閒置期限與重選時間獨立 | [Smart 連線行為](smart-connections.md#sc-02-相同-target-共用選舉結果) |
+| SC-03 | 區分節點故障、競速取消、請求截止與 HTTP 端點政策 | 已實作。TCP 先發窗口只安排後續撥號 | [Smart 連線行為](smart-connections.md#sc-03-避免把取消與端點政策當成節點故障) |
+| SC-04 | 保留一般低吞吐 TLS，依持續回流證據處置 YouTube CDN | 一般 TLS 會保留連線。影片 TCP 與 UDP 提供個別冷卻資訊，路由器實播待驗 | [Smart 連線行為](smart-connections.md#sc-04-持續劣化監測) |
+| SC-05 | 用同一 trace 區分建連、首次寫讀與關閉 | 已實作。另提供選舉、候選排除及撥號結束原因的 debug 事件 | [Smart 連線行為](smart-connections.md#sc-05-分階段診斷) |
 | SC-06 | TCP DoH 遇到 TLS 或回應靜默時，在同一筆查詢內試用同組 Smart 備援 | 已實作，macOS 50 候選離線回驗通過 | [Smart 連線行為](smart-connections.md#sc-06-tcp-doh-查詢內切換備援) |
 | SC-07 | LightGBM 啟動下載失敗時沿用舊模型，在下一個排程週期重試 | 已實作，本機 HTTP 回歸測試通過 | [Smart 連線行為](smart-connections.md#sc-07-lightgbm-啟動更新與排程重試) |
 | CI-01 | fork 獨立產出可追溯的二進制分發 | 已實作；UPX 90 組 build、rolling／Docker 及公開資產核驗通過；獨立 Test 有 macOS runner 容量取消，版本標籤發佈待驗 | [二進制分發](binary-distribution.md) |
@@ -42,13 +42,15 @@
 | `48e6b0c3` — Monitor sustained Smart connection degradation | SC-04、SC-05 |
 | `02c0eaf8` — Enable Alpha binary distribution for this fork | CI-01 |
 
-完整的 9 檔案覆蓋如下。純排版／檔尾換行沒有獨立產品意圖。
+以下檔案承載對應產品意圖。
 
 | 路徑 | 對應意圖 |
 | --- | --- |
 | `adapter/outboundgroup/smart.go` | SC-01 至 SC-05 的整合入口 |
 | `adapter/outboundgroup/smart_selection.go` | SC-02、SC-03 |
 | `adapter/outboundgroup/smart_selection_test.go` | SC-02、SC-03 的單元證據 |
+| `adapter/outboundgroup/smart_dial.go`、`smart_dial_test.go` | SC-02、SC-03、SC-05 的分層撥號與取消分類 |
+| `component/smart/memory.go`、`unwrap_cache_test.go` | SC-02 的快取選定時間、身分與 ASN 別名 |
 | `adapter/outboundgroup/smart_active_monitor.go` | SC-04 |
 | `adapter/outboundgroup/smart_active_monitor_test.go` | SC-04 的單元證據 |
 | `adapter/outboundgroup/smart_observability.go` | SC-05 |

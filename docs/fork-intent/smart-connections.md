@@ -1,6 +1,6 @@
 # Smart 連線行為意圖
 
-狀態：已實作，核對至 `02c0eaf8`；共同基準、提交及驗證成熟度見[索引](README.md)。
+狀態為已實作。2026-11-15 更新 SC-01 至 SC-05。共同基準、歷史提交與驗證成熟度見[索引](README.md)。
 
 本文件區分需要保留的行為、目前實作方法與尚未證明的部分。常數和函式可以隨上游重構改變；改變判定門檻或影響範圍時，必須同步更新意圖及證據。
 
@@ -10,13 +10,9 @@
 
 **必須保留：** TCP `DialContext` 與 UDP `ListenPacketContext` 的成功路徑，不得只因新 winner 不同就淘汰其他已建立的連線。winner 記錄、成功統計及 metric wrapper 仍須正常完成。
 
-**目前實作：** 從這兩個成功路徑移除非強制 `closeSameConnection` 呼叫。[整合程式](../../adapter/outboundgroup/smart.go)仍保留該函式及真正故障／劣化的處理。
+TCP 與 UDP 成功後會更新勝者及連線統計，再包裝該連線。新的勝者只用於新請求。一般轉發的 TCP/443 在獨立錯誤或目標失敗後可以調整後續選線，已經建立的其他連線會繼續傳輸。手動封鎖及影音的專用劣化處置仍可關閉連線。其他協定和內部連線沿用既有品質處置。[整合程式](../../adapter/outboundgroup/smart.go)
 
-**邊界：** 這不是「永不關閉既有連線」。`recordConnectionStats` 仍可在 `isDegraded || failedBlock` 時呼叫 `closeSameConnection(..., true)`；其範圍是同 SmartTarget 且 chains 含此組的其他 tracker，並不限於同一 proxy。客戶端關閉、連線錯誤及 SC-04 的確認劣化也仍可造成關閉。
-
-**同步檢查：** 同時檢查 TCP／UDP 成功路徑、winner 發佈路徑及上游新引入的 eviction／cleanup hook。不能只搜尋舊函式名稱。
-
-**驗證缺口：** 目前沒有直接覆蓋「A 節點舊連線保持開啟，B 節點新撥號成功」的 tracker 整合測試。同步相關路徑時應驗證此情境，並另確認真實故障仍可依原有規則關閉連線。
+同步時同時核對 TCP／UDP 成功、勝者發佈、品質統計及上游可能新增的連線清理路徑。驗收需涵蓋 A 已有長連線、B 承接同一目標的新連線，再觀察 A 客戶端是否完整收到資料。
 
 ## SC-02 相同 target 共用選舉結果
 
@@ -29,38 +25,27 @@
 - 不再由過期 cache 的背景排名刷新直接寫入候選列表，也不因任意一次撥號失敗就無條件清除共用 unwrap cache。
 - leader 失敗、等待取消、winner 缺失或 winner 已不在候選 provider 中，都須向呼叫者返回明確錯誤；不任意替換成未經本輪選擇的節點。
 
-**目前實作：** [smart_selection.go](../../adapter/outboundgroup/smart_selection.go) 的 `smartSelectionCoordinator`、`smartSelectionFlightKey`，以及 `smart.go` 的 `prepareDialSelection`／`finishDialSelection`：
-
 | 狀態 | 行為 |
 | --- | --- |
-| 明確手動選定節點 | 直接使用，不進入選舉 |
-| 未過期 cache 且篩選後只有一個候選 | 直接使用，成功可記錄 winner |
-| 需要重選且成為 leader | 跳過 unwrap cache 重新計算候選，成功才寫 cache 並喚醒等待者 |
-| 已有 leader，且本請求取得 cache 與非空候選 | 使用篩選結果的第一個候選，`persistWinner=false` |
-| 已有 leader，且沒有可立即使用的 cache 結果 | 受 context 約束地等待，按 winner 名稱在本次 provider 快照中查找 |
+| 手動選定的成員仍在分組 | 直接使用固定成員 |
+| 快取勝者仍合格，閒置期限和重選條件均允許使用 | 撥該勝者，成功後只續同一版勝者的閒置期限 |
+| 同目標需要重選 | 由一名 leader 使用現有排名及候選篩選。成功後發佈新的勝者 |
+| 已有 leader，舊勝者仍合格 | 並行請求可以撥舊勝者，續期時需比對原選舉結果 |
+| 已有 leader，沒有合格的舊勝者 | 按呼叫 context 等待，從本次 provider 快照查找已發佈的勝者 |
 
-TCP leader 第一批競速完整的有界候選集，目前 `maxSelected=10`，不讓所有等待者承受第一個節點逾時後才開始下一批。一般非 leader 的批次方法為首個節點，再以 `parallelDials=5` 分批，受 `maxRetries=3` 限制。UDP 共用同一 coordinator，但保留自身的順序嘗試／重試方式，不宣稱與 TCP 有相同競速方式。
+TCP 自動分組設定 `policy-priority` 時，以選定時間計算下次重選。使用分組健康檢查的 `interval`，缺省沿用五分鐘的 Smart 排名週期。到期且有較高倍率的合格成員，或原先不合格的高倍率成員恢復可用，會在下一條自然請求啟動重選。既有 URL 測試歷史也可辨識兩次請求之間發生的探測失敗與恢復。沿用現有候選上限 10 個，為各可用倍率層及仍在合格排名內的舊勝者保留位置。各層按倍率取得短暫先發，層內沿用選出時的排名。UDP 共用勝者協調並維持自己的順序嘗試。
 
-**實作限制**
+快取保留選定時間，即使持續命中。ASN 別名沿用原選舉與閒置期限，過期別名會等待新勝者。實際傳輸撥號失敗可讓原選舉失效，晚到的成功或失敗均需比對原選舉，藉此保護已發布的新結果。一般流量共用 TCP 與 UDP 的 winner，使用前依實際協定和 provider 快照再檢查。[選舉協調](../../adapter/outboundgroup/smart_selection.go) · [勝者記憶體](../../component/smart/memory.go)
 
-一般流量共用 TCP 與 UDP 的 winner。跨協定時需要檢查 provider 能力，provider 熱更新期間也可能取得不同快照。follower 取得可用快取時，會使用篩選後的第一個候選。每輪結束後移除進行中的選舉記錄，讓後續請求可發起新一輪。
-
-**驗證：** [selection tests](../../adapter/outboundgroup/smart_selection_test.go) 覆蓋 key、TCP 批次、64 個並發呼叫共用 winner、錯誤傳遞、缺失 winner 及等待取消。這些是 helper／coordinator 測試；沒有涵蓋完整的 `prepareDialSelection`＋真實 TCP／UDP 撥號、過期 cache 競爭或 provider 熱更新。
-
-**同步檢查：** 必須一起核對 `component/smart/memory.go` 的 unwrap cache 身分與寫入時機、`filterProxies` 的候選補足規則、TCP／UDP 成功與失敗路徑。上游若更改 cache 維度，不能只保留舊 coordinator key。
+測試涵蓋候選上限與倍率層、回升及定時重選條件、64 個併發呼叫協調、失敗傳遞、等待取消，以及舊撥號和 ASN 別名的續期限制。同步時核對 cache key、選定時間、寫入時機與 TCP／UDP 入口。[選舉測試](../../adapter/outboundgroup/smart_selection_test.go) · [快取測試](../../component/smart/unwrap_cache_test.go)
 
 ## SC-03 避免把取消與端點政策當成節點故障
 
-**必須保留的兩項區分：**
+- TCP 的全部候選共用外層請求期限，Smart 預設上限為 `DefaultTCPTimeout`。較高倍率層的先發時間沿用目標握手估計的五倍，缺少樣本時使用最近一次分組 URL 測試延遲。全部先發窗口最多共用剩餘期限的一半，其餘時間留給後續候選。到時啟動下一層，已發出的撥號可繼續完成。發出應用資料的只有採用的連線。
+- 記錄個別撥號的成功、真實傳輸失敗、競速取消、外層截止、嘗試截止及其他請求取消。只有真實傳輸失敗寫入節點統計。所有候選在期限內明確失敗時保留各自的錯誤。
+- `StatusTest` 探測 host 根路徑。沒有 transport error 且狀態為 403 或 405 時，與原先成功狀態同樣計入可達。503 等其他 `ok=false` 狀態仍是異常。品質與恢復檢查共用該判定，原始 HTTP 請求由端點處理。
 
-1. TCP 競速取消後，落敗嘗試回傳的錯誤不能污染節點失敗統計。`shouldRecordSmartDialFailure` 只在 `err != nil`、錯誤不是 `context.Canceled` 且 `ctx.Err()==nil` 時允許記錄。
-2. `StatusTest` 探測的是 host 根路徑，未必是使用者請求的 URL。沒有 transport error 時，原判定成功或 HTTP 403／405 都視為這條探測路徑可達；其他 `ok=false` 狀態，例如 503，仍然異常。
-
-HTTP 政策判定同時用於 `checkNodeQuality` 與 `checkHostStatus` 的恢復檢查，避免一端放行、另一端持續封鎖。它不代表使用者的原始請求已成功，也不改寫網站的 HTTP 回應。
-
-**目前邊界：** 取消分類 helper 只接在 TCP `singleDialContext`；當 context 已 deadline exceeded 時也不記錄該次 TCP 失敗。不能將這項保證擴大成 UDP 或所有統計入口都已排除取消。HTTP 403／405 例外仍以呼叫端 `err == nil` 為前提。
-
-**驗證：** `TestShouldRecordSmartDialFailureIgnoresCanceledRaceLoser`、`TestSmartStatusProbeAcceptedTreatsEndpointPolicyAsReachable`。尚缺 TCP／UDP 完整統計鏈與真實根路徑探測的整合驗證。
+先發和取消分類適用於 TCP 撥號。UDP 的撥號期限與統計入口維持既有設計。已建立的 TLS 連線上的應用狀態，只能由應用端或與傳輸相關的獨立訊號判斷。[撥號](../../adapter/outboundgroup/smart_dial.go) · [回歸測試](../../adapter/outboundgroup/smart_dial_test.go)
 
 ## SC-04 持續劣化監測
 
@@ -79,19 +64,18 @@ HTTP 政策判定同時用於 `checkNodeQuality` 與 `checkHostStatus` 的恢復
 | 零回應訊號 | 經過至少 5 秒，下載仍為 0；只輸出警告，不進入自動處置 |
 | 持續低吞吐訊號 | 下載至少 16 KiB、區段至少 2.5 秒，平均下載速率低於 16 KiB/s |
 | 新區段分隔 | 有新上傳、之前已有下載且距上次觀測下載至少 500 ms 時，可開始新區段；這是流量啟發式，不是 HTTP request 邊界 |
-| 確認視窗 | 2 分鐘 |
 | 確認後冷卻 | 5 分鐘 |
 
 一般 TCP 在一個觀測區段內最多發出一次訊號。區段達到檢查門檻且速率健康時，結束該區段。
 
-一般 TCP 在同一 Smart 實例內需要 2 分鐘內兩條不同連線對同一節點及 wildcard 發出低吞吐訊號，且第一條已關閉。零回應只輸出警告。
+一般 TCP 的低吞吐是診斷訊號。有效但低流量的連線保留，快取和冷卻狀態不因此改變。正常低流量與無流量關閉可影響品質排序，單靠這些資料不建立目標故障紀錄。零回應只輸出警告。
 
 YouTube CDN 的 TCP 和 UDP 連線只要連續採樣至少 2.5 秒、每一段都有回流但速率低於 16 KiB/s，且累計上傳至少 128 bytes、下載至少 16 KiB，即可在同一條連線確認劣化。暫停下載、完全無回包或恢復正常速率都會結束該觀測區段。手動固定節點時略過影片劣化處置。
 
 **確認後的行為**
 
 1. 冷卻以節點、wildcard 和傳輸協定為單位，期限為 5 分鐘。
-2. 一般 TCP 清除 target 級 unwrap cache。影片 CDN 的 winner 快取和選舉按協定隔離，停用 ASN 共用。確認劣化時清除該協定的 winner，並阻止冷卻節點寫回。
+2. 影片 CDN 的 winner 快取和選舉按協定隔離，停用 ASN 共用。確認劣化時清除該協定的 winner，並阻止冷卻節點寫回。
 3. 只關閉被確認劣化的 tracker。tracker 以原子旗標保留關閉原因，Smart 關閉統計可辨識這是核心主動關閉。
 4. `filterProxies` 排除冷卻中的候選，影片 UDP 只使用支援 UDP 的節點。候選用盡時由選路入口返回錯誤。
 5. Smart 群組的 `videoDegradations` 會列出節點、協定、最近確認時間和冷卻到期時間。localClash 的增強篩選可在每輪開始時讀取這些資料，略過仍在冷卻或自上一輪取樣後確認劣化的出口。
@@ -109,13 +93,15 @@ YouTube CDN 的 TCP 和 UDP 連線只要連續採樣至少 2.5 秒、每一段�
 
 **驗證**
 
-[monitor tests](../../adapter/outboundgroup/smart_active_monitor_test.go) 涵蓋 relay 解包、一般 TCP 的確認視窗、影片間歇下載、UDP tracker 關閉、冷卻節點無法寫回快取，以及下一條 UDP 連線重選與 TCP winner 保留。實際 YouTube 播放緩衝和長時間使用仍待路由器驗證。
+[monitor tests](../../adapter/outboundgroup/smart_active_monitor_test.go) 涵蓋 relay 解包、一般 TCP 低吞吐時保留 tracker 及勝者、影片間歇下載、影片 TCP 和 UDP tracker 關閉、冷卻節點無法寫回快取、下一條 UDP 連線重選和 TCP winner 隔離。實際 YouTube 播放緩衝和長時間使用待路由器驗證。
 
 ## SC-05 分階段診斷
 
 **目的：** 將 proxy 建連耗時與建連後的首次寫入／讀取分開，讓延遲調查有同一條連線的可關聯證據；診斷時間本身不新增選路、評分或關閉決策。
 
 **目前實作：** [smart_observability.go](../../adapter/outboundgroup/smart_observability.go) 在 TCP metric wrapper 中建立 trace，輸出 `[SmartTiming]` debug 記錄；包含 group、node、target、wildcard、proxy-connect、stream-ready-elapsed、first-write-to-read 及錯誤。關閉記錄加入 tracker ID、連線存續時間及流量；既有 `[Smart] Connection status` 也加入 metadata UUID。
+
+開啟 debug 後，選舉事件以同一個 dial ID 記錄倍率、加權分數、排除原因、候選順位、快取年齡、各次撥號結果和後續層啟動原因。可用 ID 對照同一輪的候選名單與實際嘗試。
 
 **必須保留：**
 
@@ -148,6 +134,10 @@ TCP DoH 的 TLS 或 DNS 回應可能在 proxy CONNECT 已成功後卡住。這�
 回歸測試讓本機 HTTP 端點在啟動下載時傳回不完整的模型，驗證下一個排程週期仍會送出請求，且舊模型檔案保留到新模型驗證成功。[更新回歸測試](../../component/updater/update_lgbm_test.go)
 
 ## 驗證入口
+
+### 2026-11-15 Smart 先發、回升與串流保留
+
+在拋棄式 iStoreOS 24.10.8 QEMU guest 跑 Linux amd64 核心 `94924df9…f3528544`，用外部客戶端和受控代理驗證兩次低流量 SSE 均完整、歷史握手很短的單節點在增至約一秒後仍可用、較慢的高倍率在先發窗口內勝出、恢復的高倍率承接新請求時原低倍率長串流仍完整，以及重複成員的三層選路。另以持續上傳和低速下載的受控 TLS 串流驗證影片 TCP 確認及 tracker 關閉。單元測試覆蓋候選上限、影片 TCP 冷卻與 UDP 重選。正式路由器、真實 ChatGPT 及影片實播仍待驗證。
 
 ### 2026-09-22 UDP 回退記錄
 
