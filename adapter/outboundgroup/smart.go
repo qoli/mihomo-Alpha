@@ -268,6 +268,9 @@ func (s *Smart) prepareDialSelection(ctx context.Context, metadata *C.Metadata) 
 	if err != nil {
 		return smartDialSelection{}, err
 	}
+	if metadata.NetWork == C.UDP && !proxy.SupportUDP() {
+		return smartDialSelection{}, fmt.Errorf("smart selection winner %q does not support UDP for %s", winner, metadata.SmartTarget)
+	}
 	if metadata.WildcardTarget == smartVideoWildcard &&
 		s.activeNodeCoolingDown(winner, metadata.WildcardTarget, metadata.NetWork, time.Now()) {
 		return smartDialSelection{}, fmt.Errorf("smart selection winner %q is cooling down for %s", winner, metadata.WildcardTarget)
@@ -626,7 +629,6 @@ func (e smartProxyEligibility) exclusion(proxy C.Proxy) string {
 func (s *Smart) filterProxies(metadata *C.Metadata, names []string, weights []float64, all []C.Proxy, minCount int, opts smartSelectionOptions) []C.Proxy {
 	eligibility := s.proxyEligibility(metadata)
 	isUDP := metadata.NetWork == C.UDP
-	wildcardTarget := metadata.WildcardTarget
 	logExclusion := func(name, reason string, weight float64) {
 		if opts.dialID != 0 {
 			log.Debugln("[Smart] Selection candidate excluded: group=[%s] target=[%s] node=[%s] priority=%.2f weight=%.3f reason=%s dial=%d",
@@ -785,7 +787,7 @@ func (s *Smart) filterProxies(metadata *C.Metadata, names []string, weights []fl
 
 		if len(selected) == 0 {
 			for _, p := range fallbackAll {
-				if eligibility.cooling(p.Name()) || (isUDP && wildcardTarget == smartVideoWildcard && !p.SupportUDP()) {
+				if eligibility.cooling(p.Name()) || (isUDP && !p.SupportUDP()) {
 					continue
 				}
 				if p.AliveForTestUrl(s.testUrl) {
@@ -799,7 +801,7 @@ func (s *Smart) filterProxies(metadata *C.Metadata, names []string, weights []fl
 
 		if len(selected) == 0 {
 			for _, p := range fallbackAll {
-				if eligibility.cooling(p.Name()) || (isUDP && wildcardTarget == smartVideoWildcard && !p.SupportUDP()) {
+				if eligibility.cooling(p.Name()) || (isUDP && !p.SupportUDP()) {
 					continue
 				}
 				selected = append(selected, p)

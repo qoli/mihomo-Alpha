@@ -1,6 +1,6 @@
 # Smart 連線行為意圖
 
-狀態為已實作。2026-11-15 更新 SC-01 至 SC-05。共同基準、歷史提交與驗證成熟度見[索引](README.md)。
+狀態為已實作。2026-11-16 更新 SC-02 的 UDP 候選資格。共同基準、歷史提交與驗證成熟度見[索引](README.md)。
 
 本文件區分需要保留的行為、目前實作方法與尚未證明的部分。常數和函式可以隨上游重構改變；改變判定門檻或影響範圍時，必須同步更新意圖及證據。
 
@@ -37,7 +37,9 @@ TCP 自動分組設定 `policy-priority` 時，以選定時間計算下次重選
 
 快取保留選定時間，即使持續命中。ASN 別名沿用原選舉與閒置期限，過期別名會等待新勝者。實際傳輸撥號失敗可讓原選舉失效，晚到的成功或失敗均需比對原選舉，藉此保護已發布的新結果。一般流量共用 TCP 與 UDP 的 winner，使用前依實際協定和 provider 快照再檢查。[選舉協調](../../adapter/outboundgroup/smart_selection.go) · [勝者記憶體](../../component/smart/memory.go)
 
-測試涵蓋候選上限與倍率層、回升及定時重選條件、64 個併發呼叫協調、失敗傳遞、等待取消，以及舊撥號和 ASN 別名的續期限制。同步時核對 cache key、選定時間、寫入時機與 TCP／UDP 入口。[選舉測試](../../adapter/outboundgroup/smart_selection_test.go) · [快取測試](../../component/smart/unwrap_cache_test.go)
+自動選路在放寬目標失敗或 URL 健康條件後仍須檢查 UDP 能力。候選用盡時，封包入口回報選路錯誤。如果 UDP follower 收到僅支援 TCP 的共用勝者，也會回報錯誤，由 tunnel 的既有重試流程再次選路。
+
+測試涵蓋候選上限與倍率層、回升及定時重選條件、64 個併發呼叫協調、失敗傳遞、等待取消，以及舊撥號和 ASN 別名的續期限制。UDP 回歸涵蓋非影音目標的兩段備選、UDP 候選用盡、TCP 勝者的共用選舉和手動指定。同步時核對 cache key、選定時間、寫入時機與 TCP／UDP 入口。[選舉測試](../../adapter/outboundgroup/smart_selection_test.go) · [快取測試](../../component/smart/unwrap_cache_test.go)
 
 ## SC-03 避免把取消與端點政策當成節點故障
 
