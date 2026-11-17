@@ -68,10 +68,10 @@ type smartSelectionCoordinator struct {
 	flights map[string]*smartSelectionFlight
 }
 
-func smartSelectionFlightKey(config, group, cacheTarget string) string {
-	// The election uses the same target key as the winner cache even when
-	// parallel connections resolve different ASN metadata.
-	return smart.FormatDBKey(config, group, cacheTarget)
+func smartSelectionFlightKey(config, group, cacheTarget string, network C.NetWork) string {
+	// Coalesce requests for the same cache target across ASN changes, but
+	// keep UDP from waiting on an election that can pick a TCP-only winner.
+	return smart.FormatDBKey(config, group, cacheTarget, network.String())
 }
 
 func (c *smartSelectionCoordinator) begin(key string) (*smartSelectionFlight, bool) {

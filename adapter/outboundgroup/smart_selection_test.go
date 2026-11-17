@@ -14,20 +14,6 @@ import (
 	C "github.com/metacubex/mihomo/constant"
 )
 
-func TestSmartSelectionFlightKeyMatchesTargetCacheIdentity(t *testing.T) {
-	const (
-		config = "config"
-		group  = "smart-group"
-		target = "GeoSite [geolocation-!cn]"
-	)
-
-	got := smartSelectionFlightKey(config, group, target)
-	want := "smart/config/smart-group/GeoSite [geolocation-!cn]"
-	if got != want {
-		t.Fatalf("smartSelectionFlightKey() = %q, want %q", got, want)
-	}
-}
-
 type smartPriorityTestProxy struct {
 	smartVideoTestProxy
 	alive   bool
@@ -92,7 +78,7 @@ func (ctx smartSelectionWaitContext) Done() <-chan struct{} {
 	return ctx.Context.Done()
 }
 
-func TestSmartUDPFollowerRejectsTCPOnlyWinner(t *testing.T) {
+func TestSmartConcurrentSelectionSeparatesTCPAndUDP(t *testing.T) {
 	smart.InitCache()
 	s := &Smart{GroupBase: NewGroupBase(GroupBaseOption{Name: t.Name(), Type: C.Smart}), store: &smart.Store{}}
 	tcpOnly := smartVideoTestProxy{name: "tcp-only"}
@@ -100,26 +86,47 @@ func TestSmartUDPFollowerRejectsTCPOnlyWinner(t *testing.T) {
 	s.providerProxies = []C.Proxy{tcpOnly, udp}
 
 	ctx := context.Background()
-	tcpMetadata := &C.Metadata{NetWork: C.TCP, Host: "grok.com", DstPort: 443}
-	leader, err := s.prepareDialSelection(ctx, tcpMetadata)
-	if err != nil || leader.flight == nil || len(leader.proxies) == 0 || leader.proxies[0].Name() != tcpOnly.Name() {
-		t.Fatalf("TCP leader selection = %+v, %v, want %s first", leader, err, tcpOnly.Name())
+	tcpMetadata := C.Metadata{NetWork: C.TCP, Host: "apple-relay.cloudflare.com", DstPort: 443, SmartTarget: "GeoSite [geolocation-!cn]"}
+	udpMetadata := tcpMetadata
+	udpMetadata.NetWork = C.UDP
+	tcpLeader, err := s.prepareDialSelection(ctx, &tcpMetadata)
+	if err != nil || tcpLeader.flight == nil || len(tcpLeader.proxies) == 0 || tcpLeader.proxies[0].Name() != tcpOnly.Name() {
+		t.Fatalf("TCP leader selection = %+v, %v, want %s first", tcpLeader, err, tcpOnly.Name())
 	}
 
-	// Publish the TCP winner once the UDP caller has joined the election.
-	udpMetadata := *tcpMetadata
-	udpMetadata.NetWork = C.UDP
-	waitCtx := smartSelectionWaitContext{Context: ctx, onWait: func() {
-		s.updateDialWinner(tcpMetadata, leader, tcpOnly)
-		s.finishDialSelection(ctx, leader, tcpOnly.Name(), nil)
-	}}
-	selection, err := s.prepareDialSelection(waitCtx, &udpMetadata)
-	if len(selection.proxies) != 0 || err == nil || !strings.Contains(err.Error(), "does not support UDP") {
-		t.Fatalf("UDP follower selection = %+v, %v, want an unsupported-winner error", selection, err)
+	publish := func(metadata *C.Metadata, selection smartDialSelection, proxy C.Proxy) {
+		s.updateDialWinner(metadata, selection, proxy)
+		s.finishDialSelection(ctx, selection, proxy.Name(), nil)
 	}
-	selection, err = s.prepareDialSelection(ctx, &udpMetadata)
-	if err != nil || len(selection.proxies) != 1 || selection.proxies[0].Name() != udp.Name() {
-		t.Fatalf("UDP retry selection = %+v, %v, want only %s", selection, err, udp.Name())
+	// Keep the TCP election pending while UDP selects. If UDP joins the TCP
+	// election, release it with the TCP-only winner so the regression fails.
+	waitedForTCP := false
+	waitCtx := smartSelectionWaitContext{Context: ctx, onWait: func() {
+		waitedForTCP = true
+		publish(&tcpMetadata, tcpLeader, tcpOnly)
+	}}
+	udpLeader, err := s.prepareDialSelection(waitCtx, &udpMetadata)
+	if waitedForTCP || err != nil || udpLeader.flight == nil || len(udpLeader.proxies) != 1 || udpLeader.proxies[0].Name() != udp.Name() {
+		t.Fatalf("UDP selection = %+v, %v (waited for TCP: %t), want independent election with only %s", udpLeader, err, waitedForTCP, udp.Name())
+	}
+
+	for _, tc := range []struct {
+		metadata  *C.Metadata
+		selection smartDialSelection
+		winner    C.Proxy
+	}{
+		{&tcpMetadata, tcpLeader, tcpOnly},
+		{&udpMetadata, udpLeader, udp},
+	} {
+		// A second request for each protocol still waits for its own leader.
+		metadata := *tc.metadata
+		waitCtx := smartSelectionWaitContext{Context: ctx, onWait: func() {
+			publish(tc.metadata, tc.selection, tc.winner)
+		}}
+		follower, err := s.prepareDialSelection(waitCtx, &metadata)
+		if err != nil || follower.flight != nil || len(follower.proxies) != 1 || follower.proxies[0].Name() != tc.winner.Name() {
+			t.Fatalf("%s follower selection = %+v, %v, want published winner %s", metadata.NetWork, follower, err, tc.winner.Name())
+		}
 	}
 }
 
