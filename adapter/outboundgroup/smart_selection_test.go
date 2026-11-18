@@ -4,6 +4,8 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net"
+	"os"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -86,7 +88,9 @@ func TestSmartConcurrentSelectionSeparatesTCPAndUDP(t *testing.T) {
 	s.providerProxies = []C.Proxy{tcpOnly, udp}
 
 	ctx := context.Background()
-	tcpMetadata := C.Metadata{NetWork: C.TCP, Host: "apple-relay.cloudflare.com", DstPort: 443, SmartTarget: "GeoSite [geolocation-!cn]"}
+	target := "GeoSite [geolocation-!cn]"
+	t.Cleanup(func() { s.store.DeleteUnwrapResult(s.Name(), s.configName, target, "", nil) })
+	tcpMetadata := C.Metadata{NetWork: C.TCP, Host: "apple-relay.cloudflare.com", DstPort: 443, SmartTarget: target}
 	udpMetadata := tcpMetadata
 	udpMetadata.NetWork = C.UDP
 	tcpLeader, err := s.prepareDialSelection(ctx, &tcpMetadata)
@@ -127,6 +131,75 @@ func TestSmartConcurrentSelectionSeparatesTCPAndUDP(t *testing.T) {
 		if err != nil || follower.flight != nil || len(follower.proxies) != 1 || follower.proxies[0].Name() != tc.winner.Name() {
 			t.Fatalf("%s follower selection = %+v, %v, want published winner %s", metadata.NetWork, follower, err, tc.winner.Name())
 		}
+	}
+}
+
+type smartPacketDialTestProxy struct {
+	smartVideoTestProxy
+	listen func(context.Context) (C.PacketConn, error)
+}
+
+func (p smartPacketDialTestProxy) ListenPacketContext(ctx context.Context, _ *C.Metadata) (C.PacketConn, error) {
+	return p.listen(ctx)
+}
+
+func TestSmartUDPSelectionLeavesTimeForNextCandidate(t *testing.T) {
+	smart.InitCache()
+	s := &Smart{GroupBase: NewGroupBase(GroupBaseOption{Name: t.Name(), Type: C.Smart}), store: &smart.Store{}}
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+
+	firstStarted := make(chan struct{})
+	stalled := smartPacketDialTestProxy{
+		smartVideoTestProxy: smartVideoTestProxy{name: "stalled", udp: true},
+		listen: func(attemptCtx context.Context) (C.PacketConn, error) {
+			close(firstStarted)
+			<-attemptCtx.Done()
+			err := &net.OpError{Op: "dial", Net: "tcp", Err: os.ErrDeadlineExceeded}
+			t.Logf("first candidate: %v (request context: %v)", err, ctx.Err())
+			return nil, err
+		},
+	}
+	working := smartPacketDialTestProxy{
+		smartVideoTestProxy: smartVideoTestProxy{name: "working", udp: true},
+		listen: func(attemptCtx context.Context) (C.PacketConn, error) {
+			t.Logf("second candidate context: %v", attemptCtx.Err())
+			if err := attemptCtx.Err(); err != nil {
+				return nil, err
+			}
+			return &smartMonitorTestPacketConn{}, nil
+		},
+	}
+	s.providerProxies = []C.Proxy{stalled, working}
+	target := "GeoSite [geolocation-!cn]"
+	t.Cleanup(func() { s.store.DeleteUnwrapResult(s.Name(), s.configName, target, "", nil) })
+	leaderMetadata := C.Metadata{NetWork: C.UDP, Host: "www.reddit.com", DstPort: 443, SmartTarget: target}
+	followerMetadata := leaderMetadata
+	followerMetadata.Host = "v.redd.it"
+	leaderResult := make(chan error, 1)
+	go func() {
+		pc, err := s.ListenPacketContext(ctx, &leaderMetadata)
+		if pc != nil {
+			_ = pc.Close()
+		}
+		leaderResult <- err
+	}()
+	select {
+	case <-firstStarted:
+	case <-ctx.Done():
+		t.Fatal("the first UDP candidate did not start")
+	}
+
+	followerCtx, cancelFollower := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancelFollower()
+	waited := false
+	waitCtx := smartSelectionWaitContext{Context: followerCtx, onWait: func() { waited = true }}
+	follower, followerErr := s.prepareDialSelection(waitCtx, &followerMetadata)
+	if err := <-leaderResult; err != nil {
+		t.Errorf("leader ListenPacketContext: %v", err)
+	}
+	if !waited || followerErr != nil || len(follower.proxies) != 1 || follower.proxies[0].Name() != working.Name() {
+		t.Fatalf("follower selection = %+v, %v (waited: %t), want published winner %s", follower, followerErr, waited, working.Name())
 	}
 }
 

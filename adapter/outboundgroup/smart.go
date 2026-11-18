@@ -346,7 +346,7 @@ func (s *Smart) DialContext(ctx context.Context, metadata *C.Metadata) (C.Conn, 
 }
 
 func (s *Smart) ListenPacketContext(ctx context.Context, metadata *C.Metadata) (pc C.PacketConn, err error) {
-	var finalErr error
+	var finalErr, transportErr error
 
 	selection, err := s.prepareDialSelection(ctx, metadata)
 	if err != nil {
@@ -364,6 +364,7 @@ func (s *Smart) ListenPacketContext(ctx context.Context, metadata *C.Metadata) (
 	}
 
 	singleProxyRetry := (len(proxies) == 1)
+	deadline, hasDeadline := ctx.Deadline()
 
 	for i := 0; i < limit; i++ {
 		proxy := proxies[i]
@@ -373,6 +374,12 @@ func (s *Smart) ListenPacketContext(ctx context.Context, metadata *C.Metadata) (
 		}
 
 		for a := 0; a < attempts; a++ {
+			if ctxErr := ctx.Err(); ctxErr != nil {
+				if finalErr != nil {
+					return nil, finalErr
+				}
+				return nil, ctxErr
+			}
 			historyConnectTime := s.getHistoryConnectStats(metadata, proxy)
 			var timeout time.Duration
 			if historyConnectTime > 0 {
@@ -381,9 +388,18 @@ func (s *Smart) ListenPacketContext(ctx context.Context, metadata *C.Metadata) (
 			if timeout > C.DefaultUDPTimeout || timeout <= 0 {
 				timeout = C.DefaultUDPTimeout
 			}
+			if remaining := limit - i; hasDeadline && remaining > 1 {
+				// Leave time for the other candidates in this election, even
+				// when the first candidate has no connect-time history.
+				share := time.Until(deadline) / time.Duration(remaining)
+				if share < timeout {
+					timeout = share
+				}
+			}
 			ctxDial, cancel := context.WithTimeout(ctx, timeout)
 			start := time.Now()
 			pc, err = proxy.ListenPacketContext(ctxDial, metadata)
+			recordFailure := err != nil && shouldRecordSmartDialFailure(ctxDial, err)
 			cancel()
 			connectTime := time.Since(start).Milliseconds()
 
@@ -392,7 +408,10 @@ func (s *Smart) ListenPacketContext(ctx context.Context, metadata *C.Metadata) (
 					return nil, err
 				}
 				finalErr = err
-				go s.recordConnectionStats(metadata, proxy, connectTime, 0, 0, 0, 0, 0, 0, nil, err)
+				if recordFailure {
+					transportErr = err
+					go s.recordConnectionStats(metadata.Clone(), proxy, connectTime, 0, 0, 0, 0, 0, 0, nil, err)
+				}
 				continue
 			}
 
@@ -407,7 +426,9 @@ func (s *Smart) ListenPacketContext(ctx context.Context, metadata *C.Metadata) (
 		}
 	}
 
-	s.groupDialFailed(proxies, finalErr)
+	if shouldRecordSmartDialFailure(ctx, transportErr) {
+		s.groupDialFailed(proxies, transportErr)
+	}
 
 	if finalErr == nil {
 		finalErr = fmt.Errorf("smart selection has no packet candidate for %s", metadata.SmartTarget)
