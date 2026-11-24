@@ -850,7 +850,7 @@ func (s *Smart) selectProxiesWithState(metadata *C.Metadata, proxies []C.Proxy, 
 	}
 	cacheTarget, cacheASN := smartWinnerCacheScope(metadata, asnNumber)
 	state := smartProxySelectionState{
-		key: smartSelectionFlightKey(s.configName, s.Name(), cacheTarget, metadata.NetWork), cacheTarget: cacheTarget, cacheASN: cacheASN,
+		key: smartSelectionFlightKey(s.configName, s.Name(), cacheTarget, metadata), cacheTarget: cacheTarget, cacheASN: cacheASN,
 	}
 
 	if selected := s.selected.Load(); selected != "" {

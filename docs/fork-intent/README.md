@@ -22,7 +22,7 @@
 | ID | 意圖 | 狀態 | 維護文件 |
 | --- | --- | --- | --- |
 | SC-01 | 成功建立新連線時保留既有連線 | 已實作。一般 TLS 的品質失敗只影響後續選線 | [Smart 連線行為](smart-connections.md#sc-01-成功撥號不淘汰既有連線) |
-| SC-02 | 相同 target 與傳輸協定共用選舉，較高倍率的合格出口能重新參與 | 已實作。TCP／UDP 各自選舉；UDP 順序撥號為後續候選預留請求時間。撥號回歸測試涵蓋共用勝者，候選版本待實機回驗 | [Smart 連線行為](smart-connections.md#sc-02-相同-target-共用選舉結果) |
+| SC-02 | 相同 target、傳輸協定與目的地址家族共用進行中選舉，較高倍率的合格出口能重新參與 | 已實作。TCP／UDP 及 IPv4／IPv6／主機名各自等待；UDP 順序撥號為後續候選預留請求時間。本機撥號回歸及 race 通過，候選版本待實機回驗 | [Smart 連線行為](smart-connections.md#sc-02-相同-target-共用選舉結果) |
 | SC-03 | 區分節點故障、競速取消、請求截止與 HTTP 端點政策 | 已實作。TCP 先發窗口只安排後續撥號。UDP 撥號期限與取消不計入節點故障 | [Smart 連線行為](smart-connections.md#sc-03-避免把取消與端點政策當成節點故障) |
 | SC-04 | 保留一般低吞吐 TLS，依持續回流證據處置 YouTube CDN | 一般 TLS 會保留連線。影片 TCP 與 UDP 提供個別冷卻資訊，路由器實播待驗 | [Smart 連線行為](smart-connections.md#sc-04-持續劣化監測) |
 | SC-05 | 用同一 trace 區分建連、首次寫讀與關閉 | 已實作。另提供選舉、候選排除及撥號結束原因的 debug 事件 | [Smart 連線行為](smart-connections.md#sc-05-分階段診斷) |
@@ -49,6 +49,7 @@
 | `adapter/outboundgroup/smart.go` | SC-01 至 SC-05 的整合入口 |
 | `adapter/outboundgroup/smart_selection.go` | SC-02、SC-03 |
 | `adapter/outboundgroup/smart_selection_test.go` | SC-02、SC-03 的單元證據 |
+| `adapter/outboundgroup/smart_selection_family_test.go` | SC-02 的跨地址家族併發撥號與等待範圍回歸 |
 | `adapter/outboundgroup/smart_dial.go`、`smart_dial_test.go` | SC-02、SC-03、SC-05 的分層撥號與取消分類 |
 | `component/smart/memory.go`、`unwrap_cache_test.go` | SC-02 的快取選定時間、身分與 ASN 別名 |
 | `adapter/outboundgroup/smart_active_monitor.go` | SC-04 |

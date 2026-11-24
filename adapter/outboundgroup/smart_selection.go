@@ -68,10 +68,14 @@ type smartSelectionCoordinator struct {
 	flights map[string]*smartSelectionFlight
 }
 
-func smartSelectionFlightKey(config, group, cacheTarget string, network C.NetWork) string {
-	// Coalesce requests for the same cache target across ASN changes, but
-	// keep UDP from waiting on an election that can pick a TCP-only winner.
-	return smart.FormatDBKey(config, group, cacheTarget, network.String())
+func smartSelectionFlightKey(config, group, cacheTarget string, metadata *C.Metadata) string {
+	// Coalesce across ASN changes, but keep different protocols and destination
+	// address families from inheriting a leader's dial failure.
+	addressType := metadata.AddrType()
+	if addressType == C.AtypIPv6 && metadata.DstIP.Is4In6() {
+		addressType = C.AtypIPv4
+	}
+	return smart.FormatDBKey(config, group, cacheTarget, metadata.NetWork.String(), addressType.String())
 }
 
 func (c *smartSelectionCoordinator) begin(key string) (*smartSelectionFlight, bool) {

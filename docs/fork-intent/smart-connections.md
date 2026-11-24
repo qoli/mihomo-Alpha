@@ -1,6 +1,6 @@
 # Smart 連線行為意圖
 
-狀態為已實作。2026-11-18 更新 SC-02 和 SC-03 的 UDP 撥號期限與錯誤分類。共同基準、歷史提交與驗證成熟度見[索引](README.md)。
+狀態為已實作。2026-11-25 更新 SC-02 的進行中選舉地址家族隔離；2026-11-18 更新 SC-02 和 SC-03 的 UDP 撥號期限與錯誤分類。共同基準、歷史提交與驗證成熟度見[索引](README.md)。
 
 本文件區分需要保留的行為、目前實作方法與尚未證明的部分。常數和函式可以隨上游重構改變；改變判定門檻或影響範圍時，必須同步更新意圖及證據。
 
@@ -20,7 +20,8 @@ TCP 與 UDP 成功後會更新勝者及連線統計，再包裝該連線。新�
 
 **必須保留：**
 
-- 需要重新選路的請求以設定、群組、winner 快取的 target key 及傳輸協定共用一輪選舉。一般流量的 target key 是 `SmartTarget`，影片 CDN 沿用按協定區分的 target key。ASN 差異不拆開同一輪選舉。
+- 需要重新選路的請求以設定、群組、winner 快取的 target key、傳輸協定及目前撥號的目的地址類型共用一輪進行中選舉。一般流量的 target key 是 `SmartTarget`，影片 CDN 沿用按協定區分的 target key。ASN、來源地址及同家族內的目的 IP／埠差異不拆開同一輪選舉。
+- 目的地址類型依傳入撥號 metadata 的 `AddrType()` 區分 IPv4、IPv6 與主機名。IP 撥號中的 IPv4-mapped IPv6 歸入 IPv4；保留 `Host` 的請求沿用主機名語意，即使同時有規則解析的 `DstIP`。`DNSMapping`／`DNSHosts` 的入口已透過 `Pure()` 清除 Host 時，依該次實際使用的 IP 分類。選舉協調不另行解析 DNS。
 - 一輪中只有 leader 以成功撥號結果發佈新的 winner。follower 使用可用的舊結果或等待 leader；不得在完成自己的撥號後覆蓋新 winner。
 - 不再由過期 cache 的背景排名刷新直接寫入候選列表，也不因任意一次撥號失敗就無條件清除共用 unwrap cache。
 - leader 失敗、等待取消、winner 缺失或 winner 已不在候選 provider 中，都須向呼叫者返回明確錯誤；不任意替換成未經本輪選擇的節點。
@@ -29,19 +30,37 @@ TCP 與 UDP 成功後會更新勝者及連線統計，再包裝該連線。新�
 | --- | --- |
 | 手動選定的成員仍在分組 | 直接使用固定成員 |
 | 快取勝者仍合格，閒置期限和重選條件均允許使用 | 撥該勝者，成功後只續同一版勝者的閒置期限 |
-| 同目標、同協定需要重選 | 由一名 leader 使用現有排名及候選篩選。成功後發佈新的勝者 |
-| 已有 leader，舊勝者仍合格 | 並行請求可以撥舊勝者，續期時需比對原選舉結果 |
-| 已有 leader，沒有合格的舊勝者 | 按呼叫 context 等待，從本次 provider 快照查找已發佈的勝者 |
+| 同目標、同協定、同目的地址類型需要重選 | 由一名 leader 使用現有排名及候選篩選。成功後發佈新的勝者 |
+| 已有相同等待鍵的 leader，舊勝者仍合格 | 並行請求可以撥舊勝者，續期時需比對原選舉結果 |
+| 已有相同等待鍵的 leader，沒有合格的舊勝者 | 按呼叫 context 等待，從本次 provider 快照查找已發佈的勝者 |
 
 TCP 自動分組設定 `policy-priority` 時，以選定時間計算下次重選。使用分組健康檢查的 `interval`，缺省沿用五分鐘的 Smart 排名週期。到期且有較高倍率的合格成員，或原先不合格的高倍率成員恢復可用，會在下一條自然請求啟動重選。既有 URL 測試歷史也可辨識兩次請求之間發生的探測失敗與恢復。沿用現有候選上限 10 個，為各可用倍率層及仍在合格排名內的舊勝者保留位置。各層按倍率取得短暫先發，層內沿用選出時的排名。
 
 UDP 依排名順序建立 association。有請求期限且還有後續候選時，單次嘗試同時受既有撥號期限和剩餘時間均分結果限制。第一個候選即使缺少連線時間樣本，後續候選也能取得撥號時間。只有單一候選時沿用原本的單次期限與重試次數上限，請求截止後停止嘗試。association 成功即可發佈勝者。
 
-快取保留選定時間，即使持續命中。ASN 別名沿用原選舉與閒置期限，過期別名會等待新勝者。實際傳輸撥號失敗可讓原選舉失效，晚到的成功或失敗均需比對原選舉，藉此保護已發布的新結果。一般流量的 TCP 與 UDP 仍共用 winner 快取，使用前依實際協定和 provider 快照再檢查。[選舉協調](../../adapter/outboundgroup/smart_selection.go) · [勝者記憶體](../../component/smart/memory.go)
+快取保留選定時間，即使持續命中。ASN 別名沿用原選舉與閒置期限，過期別名會等待新勝者。實際傳輸撥號失敗可讓原選舉失效，晚到的成功或失敗均需比對原選舉，藉此保護已發布的新結果。地址家族隔離的範圍限於進行中的等待鍵；winner 快取、排名及 ASN 共用沿用既有範圍。一般流量的 TCP 與 UDP 仍共用 winner 快取，使用前依實際協定和 provider 快照再檢查。[選舉協調](../../adapter/outboundgroup/smart_selection.go) · [勝者記憶體](../../component/smart/memory.go)
 
 自動選路在放寬目標失敗或 URL 健康條件後仍須檢查 UDP 能力。候選用盡時，封包入口回報選路錯誤。UDP follower 仍會確認其 leader 發佈的節點支援 UDP。
 
 測試涵蓋候選上限與倍率層、回升及定時重選條件、64 個併發呼叫協調、失敗傳遞、等待取消，以及舊撥號和 ASN 別名的續期限制。UDP 回歸涵蓋非影音目標的備選、候選用盡、手動指定、同一目標的 TCP／UDP 各自選舉，以及首個 UDP 候選逾時後，下一個合格候選成功並讓同協定等待者取得勝者。同步時核對 cache key、選定時間、寫入時機與 TCP／UDP 入口。[選舉測試](../../adapter/outboundgroup/smart_selection_test.go) · [快取測試](../../component/smart/unwrap_cache_test.go)
+
+### 2026-11-25 跨地址家族等待回歸
+
+在未修改產品程式的 `a1c312edc5896b944a85bb30ccf684177bb1ba70` 上先加入[地址家族回歸測試](../../adapter/outboundgroup/smart_selection_family_test.go)。同一 Smart 群組、同一 `GeoIP [telegram]` 的 IPv6 TCP leader 等待 loopback HTTP CONNECT 回覆時，IPv4 請求沒有向代理送出 CONNECT，隨後繼承 `smart selection wait failed for GeoIP [telegram]: 502 Could not resolve host [2001:b28:f23d:f001::a]`，測試失敗。這重現了 11 月 24 日現場紀錄的錯誤傳遞；11 月 25 日 01:07 的現場採樣未再出現相同錯誤。
+
+修正等待鍵後，同一測試確認 IPv6 leader 尚未完成時，`149.154.175.50:5222` 與 `149.154.175.58:5222` 分別送出自己的 CONNECT 並完成 echo 資料交換，IPv6 隨後仍返回原始 502。另以 TCP／UDP 共 24 個情境驗證同家族等待、不同家族獨立、IPv4-mapped IPv6、主機名優先及 `Pure()` 後的地址語意；既有 TCP／UDP 獨立選舉測試亦保留。
+
+2026-11-25 在 Go 1.26.0、darwin/arm64 的目前 Alpha checkout 執行：
+
+```bash
+# 修正前失敗，修正後通過
+go test ./adapter/outboundgroup -run '^TestSmartConcurrentSelection(SeparatesDestinationFamilies|DestinationScope)$' -count=1 -v
+# 修正後整個 outboundgroup 套件及競態檢查均通過
+go test ./adapter/outboundgroup -count=1
+CGO_ENABLED=1 go test -race ./adapter/outboundgroup -count=1
+```
+
+驗證範圍為本機選舉協調、受控代理的實際 TCP CONNECT 與資料交換，以及 outboundgroup 套件的 race 檢查。尚未部署到路由器，也未驗證真實 Telegram 或修復代理端的 IPv6 502。
 
 ## SC-03 避免把取消與端點政策當成節點故障
 
