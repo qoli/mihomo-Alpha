@@ -271,7 +271,7 @@ func (s *Smart) prepareDialSelection(ctx context.Context, metadata *C.Metadata) 
 	if metadata.NetWork == C.UDP && !proxy.SupportUDP() {
 		return smartDialSelection{}, fmt.Errorf("smart selection winner %q does not support UDP for %s", winner, metadata.SmartTarget)
 	}
-	if metadata.WildcardTarget == smartVideoWildcard &&
+	if (metadata.NetWork == C.UDP || metadata.WildcardTarget == smartVideoWildcard) &&
 		s.activeNodeCoolingDown(winner, metadata.WildcardTarget, metadata.NetWork, time.Now()) {
 		return smartDialSelection{}, fmt.Errorf("smart selection winner %q is cooling down for %s", winner, metadata.WildcardTarget)
 	}
@@ -309,6 +309,9 @@ func (s *Smart) updateDialWinner(metadata *C.Metadata, selection smartDialSelect
 		}
 		s.storeDialWinner(metadata, selection.asnNumber, proxy, higher)
 	} else if selection.cached != nil {
+		if metadata.NetWork == C.UDP && s.activeNodeCoolingDown(proxy.Name(), metadata.WildcardTarget, C.UDP, time.Now()) {
+			return
+		}
 		target, _ := smartWinnerCacheScope(metadata, selection.asnNumber)
 		s.store.TouchUnwrapResult(s.Name(), s.configName, target, selection.cached)
 	}
@@ -415,6 +418,11 @@ func (s *Smart) ListenPacketContext(ctx context.Context, metadata *C.Metadata) (
 				continue
 			}
 
+			if s.selected.Load() == "" && s.activeNodeCoolingDown(proxy.Name(), metadata.WildcardTarget, C.UDP, time.Now()) {
+				_ = pc.Close()
+				finalErr = fmt.Errorf("smart UDP exit %q is cooling down for %s", proxy.Name(), metadata.WildcardTarget)
+				break
+			}
 			s.updateDialWinner(metadata, selection, proxy)
 			s.onDialSuccess()
 			winner = proxy.Name()
@@ -590,6 +598,7 @@ func (s *Smart) MarshalJSON() ([]byte, error) {
 		"preferASN":         s.preferASN,
 		"tolerance":         s.tolerance,
 		"videoDegradations": s.videoDegradations(time.Now(), proxies),
+		"udpNoResponses":    s.udpNoResponses(time.Now(), proxies),
 	})
 }
 
@@ -619,7 +628,7 @@ func (s *Smart) proxyEligibility(metadata *C.Metadata) smartProxyEligibility {
 }
 
 func (e smartProxyEligibility) cooling(name string) bool {
-	return e.metadata.WildcardTarget == smartVideoWildcard &&
+	return (e.metadata.NetWork == C.UDP || e.metadata.WildcardTarget == smartVideoWildcard) &&
 		e.smart.activeNodeCoolingDown(name, e.metadata.WildcardTarget, e.metadata.NetWork, e.now)
 }
 
@@ -1775,6 +1784,11 @@ func (s *Smart) registerPacketClosureMetricsCallback(pc C.PacketConn, proxy C.Pr
 			info := tracker.Info()
 			uploadTotal := info.UploadTotal.Load()
 			downloadTotal := info.DownloadTotal.Load()
+			if downloadTotal == 0 && s.unansweredUDPCoolingDown(proxy.Name(), metadata.WildcardTarget, time.Now()) {
+				// Do not turn confirmed unanswered UDP into a nil-error success,
+				// or feed it into host-failure actions shared with TCP.
+				return
+			}
 			connectionDuration := time.Since(info.Start).Milliseconds()
 			maxUploadRate := info.MaxUploadRate.Load()
 			maxDownloadRate := info.MaxDownloadRate.Load()

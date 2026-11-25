@@ -19,13 +19,15 @@
 
 2026-09-22：撤銷 `92844c60`（Fix Smart UDP winner selection），Smart 程式恢復至 `651ca468` 的狀態。撤銷首個 UDP 回包才完成選舉，以及單條 UDP/443 無回包觸發冷卻、清快取和關閉的行為；保留既有 SC-01 至 SC-05。原因與觀察邊界見 [UDP 回退記錄](smart-connections.md#2026-09-22-udp-回退記錄)。上表仍是歷史上游基準，並非本次發佈版本。
 
+2026-11-26：依新的 UDP 否決要求，將 UDP/443 完全無回包列為後續選點的負面證據。沿用既有 128 bytes／5 秒觀測與 5 分鐘冷卻，在所有自動候選分支排除該 node＋wildcard 的 UDP 出口；association 與選舉仍依建立結果完成，既有連線維持生命週期，共用 TCP winner／host-failure 不因這項證據被刪除或封鎖。見 [本次調整與驗證](smart-connections.md#2026-11-26-udp-無回包否決)。
+
 | ID | 意圖 | 狀態 | 維護文件 |
 | --- | --- | --- | --- |
 | SC-01 | 成功建立新連線時保留既有連線 | 已實作。一般 TLS 的品質失敗只影響後續選線 | [Smart 連線行為](smart-connections.md#sc-01-成功撥號不淘汰既有連線) |
 | SC-02 | 相同 target、傳輸協定與目的地址家族共用進行中選舉，較高倍率的合格出口能重新參與 | 已實作。TCP／UDP 及 IPv4／IPv6／主機名各自等待；UDP 順序撥號為後續候選預留請求時間。本機撥號回歸及 race 通過，候選版本待實機回驗 | [Smart 連線行為](smart-connections.md#sc-02-相同-target-共用選舉結果) |
 | SC-03 | 區分節點故障、競速取消、請求截止與 HTTP 端點政策 | 已實作。TCP 先發窗口只安排後續撥號。UDP 撥號期限與取消不計入節點故障 | [Smart 連線行為](smart-connections.md#sc-03-避免把取消與端點政策當成節點故障) |
-| SC-04 | 保留一般低吞吐 TLS，依持續回流證據處置 YouTube CDN | 一般 TLS 會保留連線。影片 TCP 與 UDP 提供個別冷卻資訊，路由器實播待驗 | [Smart 連線行為](smart-connections.md#sc-04-持續劣化監測) |
-| SC-05 | 用同一 trace 區分建連、首次寫讀與關閉 | 已實作。另提供選舉、候選排除及撥號結束原因的 debug 事件 | [Smart 連線行為](smart-connections.md#sc-05-分階段診斷) |
+| SC-04 | 保留一般低吞吐 TLS，依持續回流證據處置 YouTube CDN，否決完全無回包的 UDP/443 出口 | UDP 無回包只影響後續自動選點，不關閉原通道；影片低吞吐仍沿用原處置。受控封包回歸通過，正式路由器待驗 | [Smart 連線行為](smart-connections.md#sc-04-持續劣化監測) |
+| SC-05 | 用同一 trace 區分建連、首次寫讀與關閉 | 已實作。另提供選舉、候選排除及撥號結束原因的 debug 事件，以及 UDP 否決的警告與 `udpNoResponses` 狀態 | [Smart 連線行為](smart-connections.md#sc-05-分階段診斷) |
 | SC-06 | TCP DoH 遇到 TLS 或回應靜默時，在同一筆查詢內試用同組 Smart 備援 | 已實作，macOS 50 候選離線回驗通過 | [Smart 連線行為](smart-connections.md#sc-06-tcp-doh-查詢內切換備援) |
 | SC-07 | LightGBM 啟動下載失敗時沿用舊模型，在下一個排程週期重試 | 已實作，本機 HTTP 回歸測試通過 | [Smart 連線行為](smart-connections.md#sc-07-lightgbm-啟動更新與排程重試) |
 | CI-01 | fork 獨立產出可追溯的二進制分發 | 已實作；UPX 90 組 build、rolling／Docker 及公開資產核驗通過；獨立 Test 有 macOS runner 容量取消，版本標籤發佈待驗 | [二進制分發](binary-distribution.md) |
@@ -54,6 +56,7 @@
 | `component/smart/memory.go`、`unwrap_cache_test.go` | SC-02 的快取選定時間、身分與 ASN 別名 |
 | `adapter/outboundgroup/smart_active_monitor.go` | SC-04 |
 | `adapter/outboundgroup/smart_active_monitor_test.go` | SC-04 的單元證據 |
+| `adapter/outboundgroup/smart_udp_no_response.go`、`smart_udp_no_response_test.go` | SC-04 的 UDP 無回包否決、受控封包與選點回歸 |
 | `adapter/outboundgroup/smart_observability.go` | SC-05 |
 | `adapter/outboundgroup/smart_observability_test.go` | SC-05 的單元證據 |
 | `.github/workflows/build.yml` | CI-01 |

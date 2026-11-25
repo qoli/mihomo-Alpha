@@ -1,6 +1,6 @@
 # Smart 連線行為意圖
 
-狀態為已實作。2026-11-25 更新 SC-02 的進行中選舉地址家族隔離；2026-11-18 更新 SC-02 和 SC-03 的 UDP 撥號期限與錯誤分類。共同基準、歷史提交與驗證成熟度見[索引](README.md)。
+狀態為已實作。2026-11-26 更新 SC-04 的 UDP/443 無回包否決；2026-11-25 更新 SC-02 的進行中選舉地址家族隔離；2026-11-18 更新 SC-02 和 SC-03 的 UDP 撥號期限與錯誤分類。共同基準、歷史提交與驗證成熟度見[索引](README.md)。
 
 本文件區分需要保留的行為、目前實作方法與尚未證明的部分。常數和函式可以隨上游重構改變；改變判定門檻或影響範圍時，必須同步更新意圖及證據。
 
@@ -42,6 +42,8 @@ UDP 依排名順序建立 association。有請求期限且還有後續候選時�
 
 自動選路在放寬目標失敗或 URL 健康條件後仍須檢查 UDP 能力。候選用盡時，封包入口回報選路錯誤。UDP follower 仍會確認其 leader 發佈的節點支援 UDP。
 
+UDP 無回包否決是額外的協定專屬資格檢查：即使 winner 快取仍在，或候選耗盡而進入放寬分支，也不得沿用仍在冷卻的 node＋wildcard UDP 出口。follower 取得 winner 後與 UDP 撥號返回後同樣檢查；撥號途中才被否決的新 association 在交付封包前釋放並結束該候選的嘗試。否決中的 UDP 出口不能寫回或續期 winner。這些檢查不延後選舉至首個回包，也不關閉已交付的 association。
+
 測試涵蓋候選上限與倍率層、回升及定時重選條件、64 個併發呼叫協調、失敗傳遞、等待取消，以及舊撥號和 ASN 別名的續期限制。UDP 回歸涵蓋非影音目標的備選、候選用盡、手動指定、同一目標的 TCP／UDP 各自選舉，以及首個 UDP 候選逾時後，下一個合格候選成功並讓同協定等待者取得勝者。同步時核對 cache key、選定時間、寫入時機與 TCP／UDP 入口。[選舉測試](../../adapter/outboundgroup/smart_selection_test.go) · [快取測試](../../component/smart/unwrap_cache_test.go)
 
 ### 2026-11-25 跨地址家族等待回歸
@@ -72,11 +74,11 @@ CGO_ENABLED=1 go test -race ./adapter/outboundgroup -count=1
 
 ## SC-04 持續劣化監測
 
-**目的：** 在保留正常連線的同時，為已建立但持續低吞吐的連線提供可解釋、有範圍的處理機制。一次慢回應或多條同時等待的連線不足以確認節點劣化。
+**目的：** 在保留正常連線的同時，為持續低吞吐的影片連線及完全無回包的 UDP/443 出口提供可解釋、有範圍的處置。UDP 無回包採否決後續出口，影片持續低吞吐沿用既有連線劣化處置。
 
 **納入範圍**
 
-監測適用於目的埠 443、有 `WildcardTarget` 的 TCP 連線，以及 `googlevideo.com` 及其子網域的 UDP 連線。兩者都從既有 tracker 取流量差分，排除 `INNER` 連線。
+監測適用於目的埠 443、有 `WildcardTarget` 的 TCP 與 UDP 連線，都從既有 tracker 取流量差分，排除 `INNER` 連線。UDP 完全無回包的否決涵蓋一般網站；UDP 持續低吞吐的主動關閉仍只適用於 `googlevideo.com` 及其子網域。
 
 **目前參數與判定：**
 
@@ -84,24 +86,37 @@ CGO_ENABLED=1 go test -race ./adapter/outboundgroup -count=1
 | --- | --- |
 | 採樣間隔 | tunnel Running 後，每 1 秒取樣 |
 | 有意義的上傳 | 觀測區段內至少 128 bytes |
-| 零回應訊號 | 經過至少 5 秒，下載仍為 0；只輸出警告，不進入自動處置 |
+| 零回應訊號 | TCP 經過至少 5 秒、區段下載仍為 0 時只輸出警告。UDP 自累計上傳達 128 bytes 的首次採樣起至少 5 秒、通道累計下載仍為 0 時否決該出口 |
 | 持續低吞吐訊號 | 下載至少 16 KiB、區段至少 2.5 秒，平均下載速率低於 16 KiB/s |
 | 新區段分隔 | 有新上傳、之前已有下載且距上次觀測下載至少 500 ms 時，可開始新區段；這是流量啟發式，不是 HTTP request 邊界 |
-| 確認後冷卻 | 5 分鐘 |
+| 確認後冷卻 | 影片持續低吞吐及 UDP 完全無回包均為 5 分鐘 |
 
 一般 TCP 在一個觀測區段內最多發出一次訊號。區段達到檢查門檻且速率健康時，結束該區段。
 
-一般 TCP 的低吞吐是診斷訊號。有效但低流量的連線保留，快取和冷卻狀態不因此改變。正常低流量與無流量關閉可影響品質排序，單靠這些資料不建立目標故障紀錄。零回應只輸出警告。
+一般 TCP 的低吞吐是診斷訊號。有效但低流量的連線保留，快取和冷卻狀態不因此改變。正常低流量與無流量關閉可影響品質排序，單靠這些資料不建立目標故障紀錄。TCP 零回應只輸出警告。
 
 YouTube CDN 的 TCP 和 UDP 連線只要連續採樣至少 2.5 秒、每一段都有回流但速率低於 16 KiB/s，且累計上傳至少 128 bytes、下載至少 16 KiB，即可在同一條連線確認劣化。暫停下載、完全無回包或恢復正常速率都會結束該觀測區段。手動固定節點時略過影片劣化處置。
 
+UDP 完全無回包獨立於影片低吞吐區段取樣，因此不再因為下載為 0、未達 16 KiB 就漏掉否決。每條 association 最多產生一次這項訊號；已收到回包後的正常閒置、尚無流量或上傳不足 128 bytes 均不觸發。沿用一秒採樣，實際觸發時間包含採樣延遲。
+
 **確認後的行為**
+
+影片持續低吞吐沿用以下行為：
 
 1. 冷卻以節點、wildcard 和傳輸協定為單位，期限為 5 分鐘。
 2. 影片 CDN 的 winner 快取和選舉按協定隔離，停用 ASN 共用。確認劣化時清除該協定的 winner，並阻止冷卻節點寫回。
 3. 只關閉被確認劣化的 tracker。tracker 以原子旗標保留關閉原因，Smart 關閉統計可辨識這是核心主動關閉。
 4. `filterProxies` 排除冷卻中的候選，影片 UDP 只使用支援 UDP 的節點。候選用盡時由選路入口返回錯誤。
 5. Smart 群組的 `videoDegradations` 會列出節點、協定、最近確認時間和冷卻到期時間。localClash 的增強篩選可在每輪開始時讀取這些資料，略過仍在冷卻或自上一輪取樣後確認劣化的出口。
+
+UDP 完全無回包使用獨立的否決紀錄：
+
+1. 冷卻範圍為此 Smart 群組內的 node＋wildcard＋UDP。所有自動候選分支均排除該出口，沒有可用候選時明確回報錯誤，不能因放寬健康條件而選回原節點。
+2. 不刪除一般目標的共用 winner／ASN 快取，不寫入共用 TCP／UDP host-failure，不中斷原 association。TCP 沿用原有資格判定；其他 wildcard 不受影響。之後正常選出的 UDP winner 仍沿用既有共用快取語意。
+3. 不延後 association 成功、選舉完成或封包交付。否決生效前已建立的 association 可以繼續收到遲來回包；否決影響下一次自然選點。冷卻期間的遲來回包不撤銷既有否決。
+4. 否決仍有效且 UDP 關閉時累計下載仍為 0，略過原本以 `nil` error 記錄成功的品質統計，避免將零回包重新計作成功或經共用品質路徑影響 TCP。
+5. 警告 `Denied unanswered UDP exit` 與 Smart 群組 `udpNoResponses` 提供 node、wildcard、觀測時間及冷卻到期時間。資料不混入 `videoDegradations`，因此不會把 UDP 專屬否決擴散到 localClash 的一般節點資格池。過期紀錄會清理。
+6. 手動固定節點保留使用者選擇，不啟用這項自動否決。
 
 **必須保留的效能／生命週期邊界：** 不攔截每次 Read／Write 重新計量；從既有 tracker 取樣。`ReaderReplaceable`／`WriterReplaceable`／`Upstream` 允許 relay 解包，避免破壞底層傳輸快路徑。monitor 等待 tunnel Running，隨 Smart context 取消而結束；Close 將連線移出監測集合。
 
@@ -113,10 +128,13 @@ YouTube CDN 的 TCP 和 UDP 連線只要連續採樣至少 2.5 秒、每一段�
 - 手動選定節點的路徑會提前返回，跳過 `filterProxies` 的冷卻排除。一般 TCP 的監測沿用原有適用範圍。
 - cache 已清除後才再定位 tracker；找不到 tracker 或 Close 失敗時會記錄警告，冷卻不會自動回滾。
 - monitor 直接關閉的是確認連線；SC-01 所述原有 force-close 路徑仍存在，不能把整個 Smart 的關閉範圍描述成只限此連線。
+- UDP 無回包否決只涵蓋 UDP/443、有效 wildcard、非 `INNER`，不是對所有 UDP 應用的回應語意檢測。無回包仍可能出自目標或網路，這項訊號表示當時出口對該 wildcard 不適合繼續優選，不宣稱整個節點不可用。
 
 **驗證**
 
 [monitor tests](../../adapter/outboundgroup/smart_active_monitor_test.go) 涵蓋 relay 解包、一般 TCP 低吞吐時保留 tracker 及勝者、影片間歇下載、影片 TCP 和 UDP tracker 關閉、冷卻節點無法寫回快取、下一條 UDP 連線重選和 TCP winner 隔離。實際 YouTube 播放緩衝和長時間使用待路由器驗證。
+
+[UDP 無回包回歸](../../adapter/outboundgroup/smart_udp_no_response_test.go) 以 loopback UDP 傳送真實封包，確認一般 YouTube 網域及影片 CDN 的無回包否決、原通道仍可收到遲來回包、下一條自然請求換出口、候選耗盡不放行否決出口、TCP winner／其他目標／手動選擇不被否決，並涵蓋撥號中途否決與冷卻到期。
 
 ## SC-05 分階段診斷
 
@@ -157,6 +175,24 @@ TCP DoH 的 TLS 或 DNS 回應可能在 proxy CONNECT 已成功後卡住。這�
 回歸測試讓本機 HTTP 端點在啟動下載時傳回不完整的模型，驗證下一個排程週期仍會送出請求，且舊模型檔案保留到新模型驗證成功。[更新回歸測試](../../component/updater/update_lgbm_test.go)
 
 ## 驗證入口
+
+### 2026-11-26 UDP 無回包否決
+
+以 `739ecb57e023d994d57c2b7b6840687800c8e81a` 為基底，在目前 Alpha 工作目錄、Go 1.26.0／darwin arm64 驗證。新增回歸在未修改產品程式時，`www.youtube.com` 與 `googlevideo.com` 均以「unanswered UDP exit was not denied」失敗；調整後通過。
+
+本輪保留 SC-01 的既有連線、SC-02 的 association 成功及選舉完成時機、SC-03 的撥號錯誤分類；SC-04 改用 UDP 專屬否決紀錄，SC-05 增加對應警告與狀態。CI-01 分發工作流、標籤與二進制資產均未變更，歷史上游基準也未更新。
+
+下列命令均通過：
+
+```bash
+go test ./adapter/outboundgroup ./component/smart -count=1
+CGO_ENABLED=1 go test -race ./adapter/outboundgroup ./component/smart -count=1
+CGO_ENABLED=0 SKIP_CONCURRENT_TEST=1 SKIP_INTEROP_TEST=1 go test ./... -count=1
+CGO_ENABLED=0 SKIP_CONCURRENT_TEST=1 SKIP_INTEROP_TEST=1 go test ./... -tags with_gvisor -count=1
+git diff --check
+```
+
+完整套件沿用 build CI 的 inbound 並發／interop 跳過設定；Smart 本身的並發與 race 測試沒有跳過。UDP 封包透過 loopback 真實傳送，5 秒觀察與 5 分鐘冷卻由測試推進採樣時間，不代表已完成牆鐘時間或正式路由器實播驗收。尚未發佈、替換路由器核心或執行現場播放回驗。
 
 ### 2026-11-15 Smart 先發、回升與串流保留
 

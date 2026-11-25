@@ -28,9 +28,10 @@ const (
 )
 
 type smartActiveMonitor struct {
-	mu          sync.Mutex
-	connections map[*smartMonitoredTraffic]struct{}
-	evidence    map[smartDegradationKey]smartDegradationEvidence
+	mu            sync.Mutex
+	connections   map[*smartMonitoredTraffic]struct{}
+	evidence      map[smartDegradationKey]smartDegradationEvidence
+	unansweredUDP map[smartDegradationKey]smartDegradationEvidence
 }
 
 type smartDegradationEvidence struct {
@@ -60,21 +61,22 @@ type smartMonitoredTraffic struct {
 	tracker        statistic.Tracker
 	videoCDN       bool
 
-	mu               sync.Mutex
-	closed           bool
-	observing        bool
-	signaled         bool
-	observation      uint64
-	startedAt        time.Time
-	lastReadAt       time.Time
-	uploadBaseline   int64
-	downloadBaseline int64
-	uploadTotal      int64
-	downloadTotal    int64
-	lastSample       time.Time
-	slowSince        time.Time
-	slowUpload       int64
-	slowDownload     int64
+	mu                    sync.Mutex
+	closed                bool
+	observing             bool
+	signaled              bool
+	observation           uint64
+	startedAt             time.Time
+	lastReadAt            time.Time
+	uploadBaseline        int64
+	downloadBaseline      int64
+	uploadTotal           int64
+	downloadTotal         int64
+	lastSample            time.Time
+	slowSince             time.Time
+	slowUpload            int64
+	slowDownload          int64
+	udpNoResponseSignaled bool
 }
 
 func (s *Smart) startActiveConnectionMonitor() {
@@ -114,7 +116,7 @@ func (s *Smart) monitorActiveConnection(conn C.Conn, proxy C.Proxy, metadata *C.
 }
 
 func (s *Smart) monitorActivePacketConnection(conn C.PacketConn, proxy C.Proxy, metadata *C.Metadata) C.PacketConn {
-	if metadata == nil || metadata.NetWork != C.UDP || metadata.DstPort != 443 || metadata.Type == C.INNER || metadata.WildcardTarget != smartVideoWildcard {
+	if metadata == nil || metadata.NetWork != C.UDP || metadata.DstPort != 443 || metadata.Type == C.INNER || metadata.WildcardTarget == "" {
 		return conn
 	}
 	traffic := s.trackActiveTraffic(proxy, metadata)
@@ -142,11 +144,12 @@ func smartWinnerCacheScope(metadata *C.Metadata, asnNumber string) (string, stri
 
 func (s *Smart) storeDialWinner(metadata *C.Metadata, asnNumber string, proxy C.Proxy, eligibleHigher map[string]struct{}) {
 	target, cacheASN := smartWinnerCacheScope(metadata, asnNumber)
-	if metadata.WildcardTarget == smartVideoWildcard {
+	if metadata.NetWork == C.UDP || metadata.WildcardTarget == smartVideoWildcard {
 		s.activeMonitor.mu.Lock()
 		defer s.activeMonitor.mu.Unlock()
-		key := smartDegradationKey{node: proxy.Name(), wildcard: smartVideoWildcard, network: metadata.NetWork}
-		if time.Now().Before(s.activeMonitor.evidence[key].confirmedUntil) {
+		key := smartDegradationKey{node: proxy.Name(), wildcard: metadata.WildcardTarget, network: metadata.NetWork}
+		now := time.Now()
+		if now.Before(s.activeMonitor.evidence[key].confirmedUntil) || now.Before(s.activeMonitor.unansweredUDP[key].confirmedUntil) {
 			return
 		}
 	}
@@ -213,6 +216,17 @@ func (c *smartMonitoredTraffic) observeTotals(uploadTotal, downloadTotal int64, 
 	downloadDelta := downloadTotal - c.downloadTotal
 	c.uploadTotal = uploadTotal
 	c.downloadTotal = downloadTotal
+	if c.metadata != nil && c.metadata.NetWork == C.UDP {
+		// A UDP association with no response is different from an established
+		// flow that is idle between datagrams. Keep the existing flow alive;
+		// this observation only vetoes this exit for subsequent selections.
+		if c.startedAt.IsZero() && uploadTotal >= smartMonitorMinUploadBytes {
+			c.startedAt = now
+		}
+		if !c.videoCDN {
+			return
+		}
+	}
 	if c.videoCDN {
 		c.observeVideoTraffic(uploadDelta, downloadDelta, now)
 		return
@@ -254,7 +268,21 @@ func (c *smartMonitoredTraffic) observeVideoTraffic(uploadDelta, downloadDelta i
 func (c *smartMonitoredTraffic) sample(now time.Time) (smartMonitorSignal, bool) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	if c.closed || c.signaled {
+	if c.closed {
+		return smartMonitorSignal{}, false
+	}
+	if c.metadata != nil && c.metadata.NetWork == C.UDP {
+		if !c.udpNoResponseSignaled && !c.startedAt.IsZero() && c.downloadTotal == 0 && now.Sub(c.startedAt) >= smartMonitorNoResponseAfter {
+			c.udpNoResponseSignaled = true
+			c.observation++
+			return smartMonitorSignal{reason: "no-response-after-write", observation: c.observation,
+				duration: now.Sub(c.startedAt), uploadBytes: c.uploadTotal}, true
+		}
+		if !c.videoCDN {
+			return smartMonitorSignal{}, false
+		}
+	}
+	if c.signaled {
 		return smartMonitorSignal{}, false
 	}
 	if c.videoCDN {
@@ -332,6 +360,10 @@ func (s *Smart) sampleActiveConnections(now time.Time) {
 }
 
 func (s *Smart) handleActiveDegradation(conn *smartMonitoredTraffic, signal smartMonitorSignal, now time.Time) {
+	if conn.metadata != nil && conn.metadata.NetWork == C.UDP && signal.reason == "no-response-after-write" {
+		s.denyUnansweredUDP(conn, signal, now)
+		return
+	}
 	if conn.videoCDN && s.selected.Load() != "" {
 		return
 	}
@@ -399,7 +431,7 @@ func (s *Smart) activeNodeCoolingDown(proxyName, wildcardTarget string, network 
 	key := smartDegradationKey{node: proxyName, wildcard: wildcardTarget, network: network}
 	s.activeMonitor.mu.Lock()
 	defer s.activeMonitor.mu.Unlock()
-	return now.Before(s.activeMonitor.evidence[key].confirmedUntil)
+	return now.Before(s.activeMonitor.evidence[key].confirmedUntil) || now.Before(s.activeMonitor.unansweredUDP[key].confirmedUntil)
 }
 
 type smartVideoDegradation struct {
